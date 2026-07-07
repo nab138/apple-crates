@@ -4,23 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-adi.workspace = true
-android-coreadi.workspace = true
-elf-loader.workspace = true
-grandslam.workspace = true
-itunes.workspace = true
-xcode.workspace = true
-
-tokio.workspace = true
-libc = "0.2.176"
-reqwest = "0.13.1"
 env_logger = "0.11.8"
-base64 = "0.22.1"
-serde = { version = "1.0.228", features = ["derive"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-adid-proxy.workspace = true
-
-[target.'cfg(target_os = "windows")'.dependencies]
-library-coreadi.workspace = true
-dlopen2 = "0.8.2"
+gpui = { package = "gpui", git = "https://github.com/gpui-ce/gpui-ce" }
+gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }

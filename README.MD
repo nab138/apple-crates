@@ -68,7 +68,9 @@ A reimplementation of Xcode maybe some day? (but Rust GUI situation is not great
 
 ### super-sideloader
 
-That Sideloader rewrite in Rust I postponed. Currently, it's full of apple-account's testing code.
+That Sideloader rewrite in Rust I postponed. Work-in-progress.
+
+The icons have been taken from the Lucide icon set. See the license in [LICENSE-lucide.md].
 
 ### there should be a separate xcode api crate
 

@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 adi.workspace = true
-xpc-connection-sys = "0.1.1"
+xpc-connection-sys = { git = "https://github.com/Dadoum/xpc-connection-rs", branch="patch-1" }
 block = "0.1.6"

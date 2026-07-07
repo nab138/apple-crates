@@ -1,13 +1,12 @@
-mod developer_actions;
-
-use adi::proxy::{ADIError};
+use adi::proxy::ADIError;
 use grandslam::bundle_information::BundleInformation;
 use grandslam::plist_request::plist_to_body;
 use grandslam::{AppTokenIdentifier, AuthenticatedHTTPSession, Token};
 use plist::{Dictionary, Value};
 use plist_macros::{array, dict};
-use reqwest::{Method};
-use serde::{Serialize};
+use reqwest::Method;
+use serde::Serialize;
+use std::borrow::Cow;
 use std::fmt::Display;
 use thiserror::Error;
 
@@ -24,19 +23,26 @@ pub const XCODE_TOKEN_IDENTIFIER: AppTokenIdentifier =
 const CLIENT_ID: &str = "XABBG36SBA";
 const PROTOCOL_VERSION: &str = "QH65B2";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlatformType {
     IOS,
     TvOS,
     WatchOS,
 }
 
-impl From<&PlatformType> for &'static str {
-    fn from(value: &PlatformType) -> &'static str {
-        match value {
+impl PlatformType {
+    pub fn as_str(self) -> &'static str {
+        match self {
             PlatformType::IOS => "ios",
             PlatformType::TvOS => "tvos",
             PlatformType::WatchOS => "watchos",
         }
+    }
+}
+
+impl From<&PlatformType> for &'static str {
+    fn from(value: &PlatformType) -> &'static str {
+        value.as_str()
     }
 }
 
@@ -48,7 +54,7 @@ impl Display for PlatformType {
 }
 
 pub trait DeveloperActionBase: Serialize + Sized {
-    fn action() -> &'static str;
+    fn action() -> Cow<'static, str>;
 
     fn request(&self) -> Dictionary {
         plist::to_value(self)
@@ -64,9 +70,117 @@ pub trait DeveloperAction: DeveloperActionBase {
     fn parse_response(value: Dictionary) -> Self::Result;
 }
 
+pub trait PlatformDeveloperAction<P>: Serialize + Sized {
+    type Result;
+
+    fn action() -> Cow<'static, str>;
+
+    fn parse_response(value: Dictionary) -> Self::Result;
+
+    fn request(&self) -> Dictionary {
+        plist::to_value(self)
+            .expect("Serialization should never fail.")
+            .into_dictionary()
+            .expect("Usage error: every DeveloperAction is a dictionary.")
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct IOS;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct TvOS;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct WatchOS;
+
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct PlatformRequest<P, T> {
+    #[serde(skip)]
+    pub platform: P,
+    pub request: T,
+}
+
+pub type IOSRequest<T> = PlatformRequest<IOS, T>;
+pub type TvOSRequest<T> = PlatformRequest<TvOS, T>;
+pub type WatchOSRequest<T> = PlatformRequest<WatchOS, T>;
+
+impl<P: Default, T> PlatformRequest<P, T> {
+    pub fn new(request: T) -> Self {
+        Self {
+            platform: P::default(),
+            request,
+        }
+    }
+}
+
+impl<T: PlatformDeveloperAction<IOS>> DeveloperActionBase for PlatformRequest<IOS, T> {
+    fn action() -> Cow<'static, str> {
+        Cow::Owned(format!(
+            "ios/{}",
+            <T as PlatformDeveloperAction<IOS>>::action()
+        ))
+    }
+
+    fn request(&self) -> Dictionary {
+        <T as PlatformDeveloperAction<IOS>>::request(&self.request)
+    }
+}
+
+impl<T: PlatformDeveloperAction<IOS>> DeveloperAction for PlatformRequest<IOS, T> {
+    type Result = T::Result;
+
+    fn parse_response(value: Dictionary) -> Self::Result {
+        T::parse_response(value)
+    }
+}
+
+impl<T: PlatformDeveloperAction<TvOS>> DeveloperActionBase for PlatformRequest<TvOS, T> {
+    fn action() -> Cow<'static, str> {
+        Cow::Owned(format!(
+            "tvos/{}",
+            <T as PlatformDeveloperAction<TvOS>>::action()
+        ))
+    }
+
+    fn request(&self) -> Dictionary {
+        <T as PlatformDeveloperAction<TvOS>>::request(&self.request)
+    }
+}
+
+impl<T: PlatformDeveloperAction<TvOS>> DeveloperAction for PlatformRequest<TvOS, T> {
+    type Result = T::Result;
+
+    fn parse_response(value: Dictionary) -> Self::Result {
+        T::parse_response(value)
+    }
+}
+
+impl<T: PlatformDeveloperAction<WatchOS>> DeveloperActionBase for PlatformRequest<WatchOS, T> {
+    fn action() -> Cow<'static, str> {
+        Cow::Owned(format!(
+            "watchos/{}",
+            <T as PlatformDeveloperAction<WatchOS>>::action()
+        ))
+    }
+
+    fn request(&self) -> Dictionary {
+        <T as PlatformDeveloperAction<WatchOS>>::request(&self.request)
+    }
+}
+
+impl<T: PlatformDeveloperAction<WatchOS>> DeveloperAction for PlatformRequest<WatchOS, T> {
+    type Result = T::Result;
+
+    fn parse_response(value: Dictionary) -> Self::Result {
+        T::parse_response(value)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum XcodeError {
-    #[error("Failed to perform the demanded action: {} ({status_code})", user_string.as_ref().or(result_string.as_ref()).unwrap_or(&"(null)".to_string()))]
+    #[error("Failed to perform the demanded action: {} ({status_code})", user_string.as_deref().or(result_string.as_deref()).unwrap_or("(null)"))]
     DeveloperPortal {
         status_code: u64,
         user_string: Option<String>,
@@ -106,16 +220,16 @@ impl<'a, 'b> XcodeSession<'a, 'b> {
             "https://developerservices2.apple.com/services/{PROTOCOL_VERSION}/{}",
             T::action()
         );
-        let request_id = uuid::Uuid::new_v4();
+        let request_id = uuid::Uuid::new_v4().to_string().to_uppercase();
 
         let mut base_request = dict! {
             "clientId": CLIENT_ID,
             "protocolVersion": PROTOCOL_VERSION,
-            "requestId": request_id.to_string(),
+            "requestId": request_id,
             "userLocale": array![locale],
         };
 
-        base_request.clone_from(&developer_action.request());
+        base_request.extend(developer_action.request());
 
         let response = self
             .http_session
@@ -135,7 +249,7 @@ impl<'a, 'b> XcodeSession<'a, 'b> {
 
         let response: Dictionary = plist::from_bytes(&response)?;
         match response
-            .get("statusCode")
+            .get("resultCode")
             .and_then(Value::as_unsigned_integer)
         {
             None | Some(0) => Ok(response),
@@ -166,9 +280,9 @@ impl<'a, 'b> XcodeSession<'a, 'b> {
 #[macro_export]
 macro_rules! impl_developer_action_base {
     ($name: ty, $action: literal) => {
-        impl DeveloperActionBase for $name {
-            fn action() -> &'static str {
-                $action
+        impl $crate::DeveloperActionBase for $name {
+            fn action() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed($action)
             }
         }
     };
@@ -176,15 +290,39 @@ macro_rules! impl_developer_action_base {
 
 #[macro_export]
 macro_rules! impl_developer_action {
-    ($name: ty, $result: ty) => {
-        impl DeveloperAction for $name {
+    ($name: ty, $action: literal, $result: ty, [$($platform:ty),+ $(,)?]) => {
+        $(
+            impl $crate::PlatformDeveloperAction<$platform> for $name {
+                type Result = Result<$result, plist::Error>;
+
+                fn action() -> std::borrow::Cow<'static, str> {
+                    std::borrow::Cow::Borrowed($action)
+                }
+
+                fn parse_response(value: plist::Dictionary) -> Result<$result, plist::Error> {
+                    plist::from_value(&value.into())
+                }
+            }
+        )+
+    };
+
+    ($name: ty, $action: literal, $result: ty) => {
+        impl $crate::DeveloperActionBase for $name {
+            fn action() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed($action)
+            }
+        }
+
+        impl $crate::DeveloperAction for $name {
             type Result = Result<$result, plist::Error>;
 
-            fn parse_response(value: Dictionary) -> Result<$result, plist::Error> {
+            fn parse_response(value: plist::Dictionary) -> Result<$result, plist::Error> {
                 plist::from_value(&value.into())
             }
         }
     };
 }
+
+mod developer_actions;
 
 pub use developer_actions::*;
