@@ -4,6 +4,32 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+adi.workspace = true
+android-coreadi.workspace = true
+async_zip = { version = "0.0.18", features = ["deflate", "tokio-fs"] }
+directories = "6.0.0"
 env_logger = "0.11.8"
+futures-lite = "2.6.1"
+grandslam.workspace = true
 gpui = { package = "gpui", git = "https://github.com/gpui-ce/gpui-ce" }
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+idevice = { version = "0.1.64", features = ["usbmuxd"] }
+futures = "0.3"
+log = "0.4.33"
+plist.workspace = true
+rand = "0.10.2"
+reqwest = { workspace = true, features = ["blocking"] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.8.23"
+tokio = { workspace = true, features = ["io-util", "net", "time"] }
+uuid = { version = "1.19", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+adid-proxy = { path = "../adid-proxy" }
+core-foundation = "0.10.0"
+libc = "0.2.176"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+dlopen2 = "0.8.2"
+library-coreadi.workspace = true
+ouroboros = "0.18.5"

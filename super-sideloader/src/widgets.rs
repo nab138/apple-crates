@@ -205,7 +205,7 @@ pub(crate) fn developer_account_title(role: &SharedString) -> SharedString {
 }
 
 pub(crate) fn app_identity(app: &AppOption) -> SharedString {
-    format!("{} - {} ({})", app.bundle_id, app.version, app.build).into()
+    format!("{} - {} ({})", app.bundle_id(), app.version(), app.build()).into()
 }
 
 pub(crate) fn device_identity(device: &DeviceOption) -> SharedString {

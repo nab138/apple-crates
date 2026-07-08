@@ -577,6 +577,8 @@ dependencies = [
  "futures-lite 2.6.1",
  "pin-project",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1779,6 +1781,15 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+]
+
+[[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys",
 ]
 
 [[package]]
@@ -3339,6 +3350,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "idevice"
+version = "0.1.64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48e95040e91503e7425835843e5e985ab1ea440db9b965972021e7b845c2a6ae"
+dependencies = [
+ "base64",
+ "futures",
+ "libc",
+ "plist",
+ "plist-macro",
+ "rand 0.10.2",
+ "rustls",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4871,6 +4902,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plist-macro"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82c39e020f2d8d361e91a434cfe26bc7c3e21ae54414379816d0110f3f7ca121"
+dependencies = [
+ "plist",
+]
+
+[[package]]
 name = "plist-macros"
 version = "0.1.0"
 dependencies = [
@@ -5518,7 +5558,9 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
@@ -6477,9 +6519,31 @@ dependencies = [
 name = "super-sideloader"
 version = "0.1.0"
 dependencies = [
+ "adi",
+ "adid-proxy",
+ "android-coreadi",
+ "async_zip",
+ "core-foundation 0.10.0",
+ "directories",
+ "dlopen2",
  "env_logger",
+ "futures",
+ "futures-lite 2.6.1",
  "gpui",
  "gpui_platform",
+ "grandslam",
+ "idevice",
+ "libc",
+ "library-coreadi",
+ "log",
+ "ouroboros",
+ "plist",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "tokio",
+ "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]
@@ -6919,7 +6983,19 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -6940,6 +7016,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",

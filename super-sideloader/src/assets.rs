@@ -16,8 +16,13 @@ impl AssetSource for Assets {
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg").as_slice(),
             "icons/minus.svg" => include_bytes!("../assets/icons/minus.svg").as_slice(),
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg").as_slice(),
+            "icons/check.svg" => include_bytes!("../assets/icons/check.svg").as_slice(),
+            "icons/x.svg" => include_bytes!("../assets/icons/x.svg").as_slice(),
             "icons/refresh-cw.svg" => include_bytes!("../assets/icons/refresh-cw.svg").as_slice(),
+            "icons/rotate-ccw.svg" => include_bytes!("../assets/icons/rotate-ccw.svg").as_slice(),
             "icons/arrow-right.svg" => include_bytes!("../assets/icons/arrow-right.svg").as_slice(),
+            "icons/log-out.svg" => include_bytes!("../assets/icons/log-out.svg").as_slice(),
+            "icons/folder-open.svg" => include_bytes!("../assets/icons/folder-open.svg").as_slice(),
             _ => return Ok(None),
         };
 
@@ -35,8 +40,13 @@ impl AssetSource for Assets {
                 "plus.svg".into(),
                 "minus.svg".into(),
                 "pencil.svg".into(),
+                "check.svg".into(),
+                "x.svg".into(),
                 "refresh-cw.svg".into(),
+                "rotate-ccw.svg".into(),
                 "arrow-right.svg".into(),
+                "log-out.svg".into(),
+                "folder-open.svg".into(),
             ])
         } else {
             Ok(Vec::new())

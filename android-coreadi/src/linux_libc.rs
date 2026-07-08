@@ -1,4 +1,5 @@
 #![allow(non_camel_case_types)]
+#![allow(dead_code)]
 
 #[cfg(target_pointer_width = "32")]
 #[repr(C)]
