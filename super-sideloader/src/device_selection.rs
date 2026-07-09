@@ -1,5 +1,5 @@
-use crate::models::DeviceOption;
-use crate::preferences::DevicePreferences;
+use crate::app::models::DeviceOption;
+use crate::app::preferences::DevicePreferences;
 
 #[derive(Debug, Default)]
 pub(crate) struct DeviceSelection {

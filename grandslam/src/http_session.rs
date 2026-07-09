@@ -9,7 +9,6 @@ use reqwest::header::{HeaderMap, InvalidHeaderValue};
 use reqwest::{Certificate, Client, Method, RequestBuilder};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
 
 const SIMULATED_AUTHENTICATION_FRAMEWORK_INFORMATION: BundleInformation =
     AUTH_KIT_BUNDLE_INFORMATION;

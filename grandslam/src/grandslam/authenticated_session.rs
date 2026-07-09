@@ -1,4 +1,4 @@
-use crate::grandslam::{GRANDSLAM_DSID, build_client_provided_data};
+use crate::grandslam::build_client_provided_data;
 use crate::http_session::{AnisetteHTTPSession, AppleError, URLBag, parse_status};
 use adi::proxy::{ADIError, ADIResult};
 use aes::Aes256;
@@ -14,11 +14,11 @@ use plist::{Dictionary, Value};
 use plist_macros::{array, dict};
 use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use reqwest::{Method, RequestBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Token {
     pub duration: u64,
     // #[serde(rename = "cts")]
@@ -36,7 +36,7 @@ impl TryFrom<&Token> for HeaderValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AuthToken {
     pub alt_dsid: String,
     pub idms_token: String,

@@ -1,27 +1,18 @@
-mod adi_backend;
-mod adi_services;
-mod app_selection;
-mod assets;
+mod app;
+mod backend;
 mod constants;
-mod data;
-mod developer_accounts;
-mod device_discovery;
 mod device_selection;
-mod edit_line;
-mod ipa;
-mod main_view;
-mod models;
-mod paths;
-mod preferences;
-mod settings;
-mod system_identity;
-mod widgets;
+mod domain;
+mod ui;
 
-use assets::Assets;
+#[cfg(test)]
+mod architecture_tests;
+
 use constants::{WINDOW_HEIGHT, WINDOW_WIDTH};
 use gpui::{px, size, App, AppContext, Bounds, QuitMode, WindowBounds, WindowOptions};
 use log::LevelFilter;
-use main_view::SideloaderView;
+use ui::assets::Assets;
+use ui::main_view::SideloaderView;
 
 fn main() {
     init_logging();
@@ -30,7 +21,7 @@ fn main() {
         .with_assets(Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
-            edit_line::init(cx);
+            gpui_component::init(cx);
 
             let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
             let bounds = Bounds::centered(None, window_size, cx);

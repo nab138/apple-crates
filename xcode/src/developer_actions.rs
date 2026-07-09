@@ -7,11 +7,37 @@ pub struct EmptyResponse {}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TeamID(String);
 
+impl TeamID {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for TeamID {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for TeamID {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl AsRef<str> for TeamID {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeveloperTeam {
     pub name: String,
     pub team_id: TeamID,
+    #[serde(rename = "type", default)]
+    pub team_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +140,7 @@ pub struct DevelopmentCertificate {
     pub name: String,
     pub certificate_id: String,
     pub serial_number: String,
+    #[serde(with = "serde_bytes")]
     pub cert_content: Vec<u8>,
     #[serde(default)]
     pub machine_name: String,
@@ -307,6 +334,8 @@ pub struct UpdateAppIdResponse {
 pub struct UpdateAppIdAction {
     pub app_id_id: String,
     pub team_id: TeamID,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(flatten)]
     pub features: Dictionary,
 }
@@ -400,6 +429,7 @@ impl_developer_action!(
 pub struct ProvisioningProfile {
     pub provisioning_profile_id: String,
     pub name: String,
+    #[serde(with = "serde_bytes")]
     pub encoded_profile: Vec<u8>,
 }
 

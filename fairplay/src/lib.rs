@@ -1,3 +1,1 @@
-pub trait FairPlayProxy {
-    
-}
+pub trait FairPlayProxy {}

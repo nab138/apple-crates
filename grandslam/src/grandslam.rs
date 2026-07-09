@@ -92,8 +92,6 @@ pub(crate) fn parse_url_bag_response(url_bag_response: Bytes) -> Result<Dictiona
         .cloned()
         .ok_or(URLBagError::InvalidUrlBag)?;
 
-    println!("{:#?}", url_bag_plist);
-
     Ok(url_bag_plist)
 }
 

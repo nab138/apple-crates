@@ -119,6 +119,7 @@ impl ADIProxy for ADIdProxy {
                 .push(ptm)
                 .push(tk),
         )?;
+        mem::forget(session);
         check_response(response.get_data(c"data"))?;
         Ok(())
     }
@@ -126,6 +127,7 @@ impl ADIProxy for ADIdProxy {
     fn destroy_provisioning_session(&self, session: ADIProvisioningSession) -> ADIResult<()> {
         let response =
             self.send(ADIPayload::new(ProvisioningSessionDestroyMessage::MAGIC).push(session.val))?;
+        mem::forget(session);
         check_response(response.get_data(c"data"))?;
         Ok(())
     }
