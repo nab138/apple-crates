@@ -6,7 +6,8 @@ pub(crate) mod ipa;
 
 pub(crate) use adi::*;
 pub(crate) use developer::{
-    DeveloperAccount, DeveloperAppId, DeveloperAppIdCapability, DeveloperCertificate, DeveloperTeam,
+    DeveloperAccount, DeveloperAppId, DeveloperAppIdCapability, DeveloperCertificate,
+    DeveloperDevice, DeveloperTeam,
 };
 pub(crate) use device::*;
 pub(crate) use identity::*;

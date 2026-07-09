@@ -37,6 +37,12 @@ pub(crate) struct AppMetadata {
     pub(crate) supported_devices: Vec<SupportedDeviceFamily>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NestedBundle {
+    pub(crate) name: String,
+    pub(crate) bundle_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AppEntitlement {
     pub(crate) key: String,
@@ -66,6 +72,7 @@ pub(crate) enum EntitlementsSource {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct IpaApp {
     pub(crate) metadata: AppMetadata,
+    pub(crate) nested_bundles: Vec<NestedBundle>,
     pub(crate) path: String,
     pub(crate) icon_path: Option<String>,
     pub(crate) entitlements: Vec<AppEntitlement>,

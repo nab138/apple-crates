@@ -579,6 +579,7 @@ mod tests {
             serial_number: serial_number.to_string(),
             machine_name: "Mac".to_string(),
             private_key_available: true,
+            certificate_fingerprint: Some(format!("certificate-fingerprint-{serial_number}")),
             public_key_fingerprint: Some(format!("fingerprint-{serial_number}")),
         }
     }

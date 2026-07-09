@@ -5,10 +5,17 @@ edition = "2024"
 
 [dependencies]
 plist.workspace = true
-
-tokio.workspace = true
-lief = "0.17"
+thiserror.workspace = true
 sha1.workspace = true
 sha2.workspace = true
-futures = "0.3.31"
-log = "0.4.28"
+byteorder = "1.5"
+cms = { version = "0.2.3", features = ["builder", "rsa", "sha2"] }
+const-oid = { version = "0.9.6", features = ["db"] }
+der = { version = "0.7.10", features = ["alloc", "derive", "std"] }
+memmap2 = "0.9"
+pem-rfc7468 = { version = "0.7", features = ["alloc"] }
+rayon = "1.12"
+rsa = { version = "0.9.9", features = ["sha2"] }
+sha2_010 = { package = "sha2", version = "0.10" }
+spki = "0.7.3"
+x509-cert = "0.2.5"

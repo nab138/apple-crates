@@ -4,23 +4,56 @@ pub(crate) fn effective_entitlements_for_app(
     app: &AppOption,
     team_id: &str,
 ) -> Vec<AppEntitlement> {
+    let bundle_id = effective_bundle_identifier_for_app(app, team_id);
     effective_entitlements(
         app.entitlements_source,
         &app.entitlements,
         app.entitlement_overrides.as_deref(),
-        app.bundle_id(),
+        &bundle_id,
         team_id,
     )
+}
+
+pub(crate) fn effective_bundle_identifier_for_app(app: &AppOption, team_id: &str) -> String {
+    effective_bundle_identifier(app.bundle_id(), team_id)
+}
+
+pub(crate) fn effective_bundle_identifier(bundle_id: &str, team_id: &str) -> String {
+    let team_id = team_id.trim();
+    if team_id.is_empty()
+        || bundle_id
+            .strip_suffix(team_id)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+    {
+        bundle_id.to_string()
+    } else {
+        format!("{bundle_id}.{team_id}")
+    }
+}
+
+pub(crate) fn effective_nested_bundle_identifier(
+    original_root_bundle_id: &str,
+    root_bundle_id: &str,
+    nested_bundle_id: &str,
+    team_id: &str,
+) -> String {
+    let effective_root = effective_bundle_identifier(root_bundle_id, team_id);
+    nested_bundle_id
+        .strip_prefix(original_root_bundle_id)
+        .filter(|suffix| suffix.starts_with('.'))
+        .map(|suffix| format!("{effective_root}{suffix}"))
+        .unwrap_or_else(|| effective_bundle_identifier(nested_bundle_id, team_id))
 }
 
 pub(crate) fn default_effective_entitlements_for_app(
     app: &AppOption,
     team_id: &str,
 ) -> Vec<AppEntitlement> {
+    let bundle_id = effective_bundle_identifier_for_app(app, team_id);
     default_effective_entitlements(
         app.entitlements_source,
         &app.entitlements,
-        app.bundle_id(),
+        &bundle_id,
         team_id,
     )
 }
@@ -93,11 +126,8 @@ fn team_adjusted_entitlement(
     let mut entitlement = entitlement.clone();
     match entitlement.key.as_str() {
         "application-identifier" => {
-            entitlement.value = EntitlementValue::String(team_prefixed_identifier(
-                &entitlement.value.edit_text(),
-                bundle_id,
-                team_id,
-            ));
+            entitlement.value =
+                EntitlementValue::String(team_prefixed_bundle_identifier(bundle_id, team_id));
         }
         "com.apple.developer.team-identifier" => {
             entitlement.value = EntitlementValue::String(team_id.to_string());
@@ -151,9 +181,13 @@ fn team_prefixed_identifier(value: &str, bundle_id: &str, team_id: &str) -> Stri
     team_prefixed_bundle_identifier(suffix, team_id)
 }
 
-fn team_prefixed_bundle_identifier(bundle_id: &str, team_id: &str) -> String {
+pub(crate) fn team_prefixed_bundle_identifier(bundle_id: &str, team_id: &str) -> String {
     let team_id = team_id.trim();
-    if team_id.is_empty() {
+    if team_id.is_empty()
+        || bundle_id
+            .strip_prefix(team_id)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+    {
         bundle_id.to_string()
     } else {
         format!("{team_id}.{bundle_id}")
@@ -191,6 +225,48 @@ mod tests {
     }
 
     #[test]
+    fn team_prefixed_bundle_identifier_is_idempotent() {
+        assert_eq!(
+            team_prefixed_bundle_identifier("com.example.app", "TEAM123"),
+            "TEAM123.com.example.app"
+        );
+        assert_eq!(
+            team_prefixed_bundle_identifier("TEAM123.com.example.app", "TEAM123"),
+            "TEAM123.com.example.app"
+        );
+    }
+
+    #[test]
+    fn effective_bundle_identifiers_match_sideloader_layout() {
+        assert_eq!(
+            effective_bundle_identifier("com.example.app", "TEAM123"),
+            "com.example.app.TEAM123"
+        );
+        assert_eq!(
+            effective_bundle_identifier("com.example.app.TEAM123", "TEAM123"),
+            "com.example.app.TEAM123"
+        );
+        assert_eq!(
+            effective_nested_bundle_identifier(
+                "com.example.app",
+                "com.example.app",
+                "com.example.app.widget",
+                "TEAM123"
+            ),
+            "com.example.app.TEAM123.widget"
+        );
+        assert_eq!(
+            effective_nested_bundle_identifier(
+                "com.example.app",
+                "altcom.example.app",
+                "com.example.app.SubApp.Extension",
+                "TEAM123"
+            ),
+            "altcom.example.app.TEAM123.SubApp.Extension"
+        );
+    }
+
+    #[test]
     fn embedded_entitlements_are_adjusted_for_selected_team() {
         let entitlements = default_effective_entitlements(
             EntitlementsSource::Embedded,
@@ -212,7 +288,7 @@ mod tests {
 
         assert_eq!(
             entitlements[0].value,
-            EntitlementValue::String("TEAM123.com.old.app".into())
+            EntitlementValue::String("TEAM123.com.example.app".into())
         );
         assert_eq!(
             entitlements[1].value,
@@ -232,6 +308,7 @@ mod tests {
                 "16.0",
                 vec![SupportedDeviceFamily::IPhone],
             ),
+            nested_bundles: Vec::new(),
             path: "/tmp/Example.ipa".to_string(),
             icon_path: None,
             icon_override_path: None,
@@ -250,7 +327,7 @@ mod tests {
                 app.entitlements_source,
                 &app.entitlements,
                 app.entitlement_overrides.as_deref(),
-                app.bundle_id(),
+                "com.example.app.TEAM123",
                 "TEAM123",
             )
         );
@@ -259,9 +336,13 @@ mod tests {
             default_effective_entitlements(
                 app.entitlements_source,
                 &app.entitlements,
-                app.bundle_id(),
+                "com.example.app.TEAM123",
                 "TEAM123",
             )
+        );
+        assert_eq!(
+            effective_entitlements_for_app(&app, "TEAM123")[0].value,
+            EntitlementValue::String("TEAM123.com.example.app.TEAM123".into())
         );
     }
 }

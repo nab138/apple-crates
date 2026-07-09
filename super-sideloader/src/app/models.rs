@@ -29,15 +29,23 @@ pub(crate) struct DevelopmentCertificateOption {
     pub(crate) serial_number: String,
     pub(crate) machine_name: String,
     pub(crate) private_key_available: bool,
+    pub(crate) certificate_fingerprint: Option<String>,
     pub(crate) public_key_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeveloperDeviceOption {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) udid: String,
 }
 
 impl DevelopmentCertificateOption {
     pub(crate) fn private_key_status(&self) -> &'static str {
         if self.private_key_available {
-            "Private key available"
+            "Managed private key available"
         } else {
-            "Private key missing"
+            "Managed private key missing"
         }
     }
 
@@ -428,6 +436,7 @@ pub(crate) enum EntitlementsSource {
 #[derive(Clone, Debug)]
 pub(crate) struct AppOption {
     pub(crate) metadata: AppMetadata,
+    pub(crate) nested_bundles: Vec<NestedBundleOption>,
     pub(crate) path: String,
     pub(crate) icon_path: Option<String>,
     pub(crate) icon_override_path: Option<String>,
@@ -437,6 +446,12 @@ pub(crate) struct AppOption {
     pub(crate) patches: Vec<PatchOption>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NestedBundleOption {
+    pub(crate) name: String,
+    pub(crate) bundle_id: String,
+}
+
 impl AppOption {
     pub(crate) fn name(&self) -> &String {
         self.metadata.name.value()
@@ -444,6 +459,10 @@ impl AppOption {
 
     pub(crate) fn bundle_id(&self) -> &String {
         self.metadata.bundle_id.value()
+    }
+
+    pub(crate) fn original_bundle_id(&self) -> &String {
+        &self.metadata.bundle_id.default
     }
 
     pub(crate) fn version(&self) -> &String {
@@ -626,9 +645,17 @@ pub(crate) enum SideloadPhase {
 #[derive(Clone, Debug)]
 pub(crate) enum SideloadOperation {
     Idle,
-    Running { phase: SideloadPhase, progress: f32 },
-    Finished,
-    Failed { message: String },
+    Running {
+        phase: SideloadPhase,
+        progress: f32,
+        detail: String,
+    },
+    Finished {
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 impl SideloadOperation {
@@ -640,7 +667,7 @@ impl SideloadOperation {
         match self {
             Self::Idle => 0.,
             Self::Running { progress, .. } => progress.clamp(0., 1.),
-            Self::Finished => 1.,
+            Self::Finished { .. } => 1.,
             Self::Failed { .. } => 0.,
         }
     }

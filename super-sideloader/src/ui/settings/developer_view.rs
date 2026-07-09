@@ -14,6 +14,10 @@ pub(super) struct DeveloperViewProps<'a> {
     pub(super) app_id_picker_open: bool,
     pub(super) app_id_add_form: Option<&'a AppIdAddForm>,
     pub(super) app_id_edit_form: Option<&'a AppIdEditForm>,
+    pub(super) developer_devices: &'a [DeveloperDeviceOption],
+    pub(super) developer_devices_loading: bool,
+    pub(super) developer_device_add_form: Option<&'a DeveloperDeviceAddForm>,
+    pub(super) developer_devices_error: Option<SharedString>,
     pub(super) team_refreshing: bool,
     pub(super) team_refresh_error: Option<SharedString>,
     pub(super) certificate_error: Option<SharedString>,
@@ -34,6 +38,10 @@ pub(super) fn render(props: DeveloperViewProps<'_>, cx: &mut Context<SettingsWin
         app_id_picker_open,
         app_id_add_form,
         app_id_edit_form,
+        developer_devices,
+        developer_devices_loading,
+        developer_device_add_form,
+        developer_devices_error,
         team_refreshing,
         team_refresh_error,
         certificate_error,
@@ -66,6 +74,17 @@ pub(super) fn render(props: DeveloperViewProps<'_>, cx: &mut Context<SettingsWin
             edit_form: app_id_edit_form,
             refreshing: team_refreshing,
             operation_error: team_refresh_error,
+        },
+        cx,
+    ));
+    content = content.child(developer_device_section(
+        DeveloperDeviceSectionProps {
+            team,
+            devices: developer_devices,
+            loading: developer_devices_loading,
+            team_refreshing,
+            add_form: developer_device_add_form,
+            operation_error: developer_devices_error,
         },
         cx,
     ));
@@ -493,14 +512,11 @@ fn missing_private_key_warning(
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(0x7a5613))
-                        .child("Private key missing"),
+                        .child("Managed private key missing"),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x7a6a50))
-                        .child("Import the matching private key to use this certificate."),
-                ),
+                .child(div().text_xs().text_color(rgb(0x7a6a50)).child(
+                    "Import the matching PEM key for Super Sideloader to use this certificate.",
+                )),
         )
         .child(
             surface_button("import-certificate-key")
@@ -1115,6 +1131,257 @@ fn app_id_icon_button(
         .when(disabled, |this| this.opacity(0.45).tab_stop(false))
         .when(!disabled, |this| this.cursor_pointer().on_click(listener))
         .child(icon_button_surface(icon, 0xebf1f0, 0xdfe8e6, 0x53666d))
+}
+
+struct DeveloperDeviceSectionProps<'a> {
+    team: Option<&'a TeamOption>,
+    devices: &'a [DeveloperDeviceOption],
+    loading: bool,
+    team_refreshing: bool,
+    add_form: Option<&'a DeveloperDeviceAddForm>,
+    operation_error: Option<SharedString>,
+}
+
+fn developer_device_section(
+    props: DeveloperDeviceSectionProps<'_>,
+    cx: &mut Context<SettingsWindow>,
+) -> gpui::Div {
+    let DeveloperDeviceSectionProps {
+        team,
+        devices,
+        loading,
+        team_refreshing,
+        add_form,
+        operation_error,
+    } = props;
+    let disabled = team.is_none() || loading || team_refreshing;
+
+    developer_settings_section(
+        "Devices",
+        "Registered development devices available to provisioning profiles.",
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x6a7a81))
+                            .child(match devices.len() {
+                                0 => "No devices".to_string(),
+                                1 => "1 registered device".to_string(),
+                                count => format!("{count} registered devices"),
+                            }),
+                    )
+                    .child(developer_device_add_button(disabled, add_form, cx)),
+            )
+            .when(loading, |this| {
+                this.child(
+                    div()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0xd8e0df))
+                        .bg(rgb(0xf6f9f9))
+                        .p_3()
+                        .text_xs()
+                        .text_color(rgb(0x6a7a81))
+                        .child("Loading registered devices..."),
+                )
+            })
+            .when(!loading && team.is_some() && devices.is_empty(), |this| {
+                this.child(empty_state(
+                    "No development devices are registered for this team.",
+                ))
+            })
+            .when(!loading && team.is_some(), |this| {
+                this.children(
+                    devices
+                        .iter()
+                        .enumerate()
+                        .map(|(index, device)| developer_device_row(device, index, disabled, cx)),
+                )
+            })
+            .when(team.is_none(), |this| {
+                this.child(disabled_select_placeholder(
+                    "No developer team",
+                    "Load a developer team first.",
+                    "Device management unavailable",
+                ))
+            })
+            .when_some(operation_error, |this, error| {
+                this.child(refresh_error(error))
+            }),
+    )
+}
+
+fn developer_device_add_button(
+    disabled: bool,
+    form: Option<&DeveloperDeviceAddForm>,
+    cx: &mut Context<SettingsWindow>,
+) -> AnyElement {
+    let trigger = surface_button("begin-developer-device-add")
+        .h_7()
+        .child(action_button_surface(
+            "Add Device",
+            0xebf1f0,
+            0xdfe8e6,
+            0x53666d,
+            Some(lucide_icon_tinted("icons/plus.svg", 0x53666d)),
+        ));
+
+    if disabled {
+        return trigger.opacity(0.45).tab_stop(false).into_any_element();
+    }
+
+    floating_select_popover(
+        "developer-device-add-popover-scroll",
+        trigger.cursor_pointer(),
+        form.is_some(),
+        cx.listener(|this, open: &bool, window, cx| {
+            this.set_developer_device_add_popover(*open, window, cx);
+        }),
+        FloatingPopoverLayout {
+            width: 420.,
+            max_height: 260.,
+            offset_y: 36.,
+        },
+        developer_device_add_popover(form, cx),
+    )
+    .into_any_element()
+}
+
+fn developer_device_add_popover(
+    form: Option<&DeveloperDeviceAddForm>,
+    cx: &mut Context<SettingsWindow>,
+) -> impl IntoElement {
+    let Some(form) = form else {
+        return div()
+            .p_3()
+            .text_xs()
+            .text_color(rgb(0x6a7a81))
+            .child("Preparing device...");
+    };
+
+    div()
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(settings_label("Name"))
+                .child(Input::new(&form.name).small()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(settings_label("UDID"))
+                .child(Input::new(&form.udid).small()),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(
+                    surface_button("cancel-developer-device-add")
+                        .h_7()
+                        .cursor_pointer()
+                        .on_click(cx.listener(SettingsWindow::cancel_developer_device_add))
+                        .child(action_button_surface(
+                            "Cancel",
+                            0xebf1f0,
+                            0xdfe8e6,
+                            0x53666d,
+                            None::<gpui::Div>,
+                        )),
+                )
+                .child(
+                    surface_button("confirm-developer-device-add")
+                        .h_7()
+                        .cursor_pointer()
+                        .on_click(cx.listener(SettingsWindow::submit_developer_device_add))
+                        .child(primary_action_button_surface(
+                            "Register",
+                            Some(lucide_icon_tinted("icons/plus.svg", 0xffffff)),
+                        )),
+                ),
+        )
+}
+
+fn developer_device_row(
+    device: &DeveloperDeviceOption,
+    index: usize,
+    disabled: bool,
+    cx: &mut Context<SettingsWindow>,
+) -> impl IntoElement {
+    let device_id = device.id.clone();
+    div()
+        .min_w_0()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0xd8e0df))
+        .bg(rgb(0xffffff))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x24333a))
+                        .whitespace_normal()
+                        .child(device.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x6a7a81))
+                        .whitespace_normal()
+                        .child(device.udid.clone()),
+                ),
+        )
+        .child(
+            surface_button(("remove-developer-device", index))
+                .flex_none()
+                .w_7()
+                .h_7()
+                .when(disabled, |this| this.opacity(0.45).tab_stop(false))
+                .when(!disabled, |this| {
+                    this.cursor_pointer().on_click(cx.listener(
+                        move |settings, event, window, cx| {
+                            settings.remove_developer_device(device_id.clone(), event, window, cx)
+                        },
+                    ))
+                })
+                .child(icon_button_surface(
+                    "icons/trash-2.svg",
+                    0xf4e9e7,
+                    0xfff7f6,
+                    0x7d3430,
+                )),
+        )
 }
 
 fn settings_app_id_row(app_id: &AppIdOption, index: usize, selected: bool) -> Button {

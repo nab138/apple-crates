@@ -91,6 +91,8 @@ pub(crate) struct CachedDevelopmentCertificate {
     pub(crate) machine_name: String,
     pub(crate) private_key_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) certificate_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) public_key_fingerprint: Option<String>,
 }
 
@@ -199,6 +201,7 @@ impl From<CachedDevelopmentCertificate> for DeveloperCertificate {
             serial_number: certificate.serial_number,
             machine_name: certificate.machine_name,
             private_key_available: certificate.private_key_available,
+            certificate_fingerprint: certificate.certificate_fingerprint,
             public_key_fingerprint: certificate.public_key_fingerprint,
         }
     }
@@ -440,6 +443,7 @@ mod tests {
                 serial_number: id.to_string(),
                 machine_name: "Machine".to_string(),
                 private_key_available: false,
+                certificate_fingerprint: None,
                 public_key_fingerprint: None,
             }],
         }
@@ -470,5 +474,22 @@ mod tests {
 
         assert_eq!(account.teams.len(), 2);
         assert_eq!(account.teams[1].id, "TEAM2");
+    }
+
+    #[test]
+    fn old_certificate_cache_entries_need_a_certificate_refresh() {
+        let certificate: CachedDevelopmentCertificate = toml::from_str(
+            r#"
+id = "cert-id"
+name = "Apple Development"
+serial_number = "serial"
+machine_name = "Mac"
+private_key_available = true
+public_key_fingerprint = "0123456789012345678901234567890123456789"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(certificate.certificate_fingerprint, None);
     }
 }

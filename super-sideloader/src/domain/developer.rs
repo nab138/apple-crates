@@ -44,5 +44,13 @@ pub(crate) struct DeveloperCertificate {
     pub(crate) serial_number: String,
     pub(crate) machine_name: String,
     pub(crate) private_key_available: bool,
+    pub(crate) certificate_fingerprint: Option<String>,
     pub(crate) public_key_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeveloperDevice {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) udid: String,
 }

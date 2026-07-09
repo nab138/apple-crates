@@ -1,14 +1,20 @@
+use crate::app::entitlements::{
+    effective_bundle_identifier, effective_bundle_identifier_for_app,
+    effective_nested_bundle_identifier,
+};
 use crate::app::models::{
-    AccountOption, AdiBackendKind, AdiBackendOption, AppOption, DeviceOption, MachineIdentity,
-    PatchOption,
+    AccountOption, AdiBackendKind, AdiBackendOption, AppIdOption, AppOption, DeveloperDeviceOption,
+    DeviceOption, MachineIdentity, PatchOption, TeamOption,
 };
 use crate::app::selection;
 use crate::app::view_models::{
-    account_option, account_options, adi_backends, app_option, device_options, domain_adi_kind,
-    domain_machine_identity, domain_patch, machine_identity,
+    account_option, account_options, adi_backends, app_option, developer_device_options,
+    device_options, domain_adi_kind, domain_app_metadata, domain_machine_identity, domain_patch,
+    machine_identity,
 };
 use crate::app::{AppError, AppResult};
 use crate::backend::{adi_services, developer_services, device_discovery, system_identity};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub(crate) use crate::domain::DeviceWatchEvent;
@@ -16,6 +22,220 @@ pub(crate) use adi_services::CoreAdiInstallEvent;
 pub(crate) use developer_services::{
     DeveloperAppIdCapabilityUpdate, DownloadedProvisioningProfile,
 };
+
+#[derive(Clone)]
+pub(crate) struct SignIpaRequest {
+    pub(crate) developer_context: DeveloperSessionContext,
+    pub(crate) team_id: String,
+    pub(crate) team_app_ids: Vec<AppIdOption>,
+    pub(crate) certificate_fingerprint: String,
+    pub(crate) public_key_fingerprint: String,
+    pub(crate) auto_app_id: bool,
+    pub(crate) selected_app_id: Option<AppIdOption>,
+    pub(crate) app: AppOption,
+    pub(crate) output: SignIpaOutput,
+}
+
+pub(crate) struct SignIpaOutcome {
+    pub(crate) artifact: SignIpaArtifact,
+    pub(crate) updated_account: Option<AccountOption>,
+}
+
+#[derive(Clone)]
+pub(crate) enum SignIpaOutput {
+    Ipa(PathBuf),
+    AppBundle,
+}
+
+pub(crate) enum SignIpaArtifact {
+    Ipa(PathBuf),
+    AppBundle(crate::backend::ipa::SignedAppBundle),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AppIdProvisioningItem {
+    pub(crate) name: String,
+    pub(crate) identifier: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AppIdProvisioningPlan {
+    pub(crate) app_ids: Vec<AppIdProvisioningItem>,
+    pub(crate) available_quantity: Option<u64>,
+}
+
+impl AppIdProvisioningPlan {
+    pub(crate) fn remaining_after_signing(&self) -> Option<u64> {
+        self.available_quantity
+            .map(|available| available.saturating_sub(self.app_ids.len() as u64))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SignIpaProgress {
+    Preparing,
+    ResolvingAppId,
+    DownloadingProfile,
+    Extracting { completed: usize, total: usize },
+    Patching,
+    Signing,
+    Packaging { completed: usize, total: usize },
+    Saving,
+    Ready,
+}
+
+impl SignIpaProgress {
+    pub(crate) fn progress(self) -> f32 {
+        match self {
+            Self::Preparing => 0.04,
+            Self::ResolvingAppId => 0.1,
+            Self::DownloadingProfile => 0.22,
+            Self::Extracting { completed, total } => 0.3 + progress_ratio(completed, total) * 0.25,
+            Self::Patching => 0.58,
+            Self::Signing => 0.64,
+            Self::Packaging { completed, total } => 0.72 + progress_ratio(completed, total) * 0.24,
+            Self::Saving => 0.98,
+            Self::Ready => 0.98,
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Preparing => "Preparing signing resources".to_string(),
+            Self::ResolvingAppId => "Resolving App ID".to_string(),
+            Self::DownloadingProfile => "Downloading provisioning profile".to_string(),
+            Self::Extracting { completed, total } => {
+                format!("Extracting IPA ({completed}/{total})")
+            }
+            Self::Patching => "Applying app changes".to_string(),
+            Self::Signing => "Signing app bundle".to_string(),
+            Self::Packaging { completed, total } => {
+                format!("Packaging signed IPA ({completed}/{total})")
+            }
+            Self::Saving => "Saving signed IPA".to_string(),
+            Self::Ready => "Signed app ready for transfer".to_string(),
+        }
+    }
+}
+
+impl From<crate::backend::ipa::IpaSigningProgress> for SignIpaProgress {
+    fn from(progress: crate::backend::ipa::IpaSigningProgress) -> Self {
+        match progress {
+            crate::backend::ipa::IpaSigningProgress::Extracting { completed, total } => {
+                Self::Extracting { completed, total }
+            }
+            crate::backend::ipa::IpaSigningProgress::Patching => Self::Patching,
+            crate::backend::ipa::IpaSigningProgress::Signing => Self::Signing,
+            crate::backend::ipa::IpaSigningProgress::Packaging { completed, total } => {
+                Self::Packaging { completed, total }
+            }
+            crate::backend::ipa::IpaSigningProgress::Saving => Self::Saving,
+            crate::backend::ipa::IpaSigningProgress::Ready => Self::Ready,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InstallAppProgress {
+    Connecting,
+    Uploading {
+        transferred_bytes: u64,
+        total_bytes: u64,
+        completed_files: usize,
+        total_files: usize,
+    },
+    Installing {
+        percent: u64,
+    },
+    Finalizing,
+}
+
+impl InstallAppProgress {
+    pub(crate) fn progress(self) -> f32 {
+        match self {
+            Self::Connecting => 0.02,
+            Self::Uploading {
+                transferred_bytes,
+                total_bytes,
+                ..
+            } => 0.05 + byte_progress_ratio(transferred_bytes, total_bytes) * 0.43,
+            Self::Installing { percent } => 0.5 + (percent.min(100) as f32 / 100.) * 0.47,
+            Self::Finalizing => 0.99,
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Connecting => "Connecting to device".to_string(),
+            Self::Uploading {
+                transferred_bytes,
+                total_bytes,
+                completed_files,
+                total_files,
+            } => format!(
+                "Uploading app files ({completed_files}/{total_files}, {} / {})",
+                formatted_byte_count(transferred_bytes),
+                formatted_byte_count(total_bytes)
+            ),
+            Self::Installing { percent } => {
+                format!("Verifying and installing on device ({percent}%)")
+            }
+            Self::Finalizing => "Cleaning up device staging".to_string(),
+        }
+    }
+}
+
+impl From<crate::domain::DeviceInstallProgress> for InstallAppProgress {
+    fn from(progress: crate::domain::DeviceInstallProgress) -> Self {
+        match progress {
+            crate::domain::DeviceInstallProgress::Connecting => Self::Connecting,
+            crate::domain::DeviceInstallProgress::Uploading {
+                transferred_bytes,
+                total_bytes,
+                completed_files,
+                total_files,
+            } => Self::Uploading {
+                transferred_bytes,
+                total_bytes,
+                completed_files,
+                total_files,
+            },
+            crate::domain::DeviceInstallProgress::Installing { percent } => {
+                Self::Installing { percent }
+            }
+            crate::domain::DeviceInstallProgress::Finalizing => Self::Finalizing,
+        }
+    }
+}
+
+fn progress_ratio(completed: usize, total: usize) -> f32 {
+    if total == 0 {
+        1.
+    } else {
+        (completed as f32 / total as f32).clamp(0., 1.)
+    }
+}
+
+fn byte_progress_ratio(completed: u64, total: u64) -> f32 {
+    if total == 0 {
+        1.
+    } else {
+        (completed as f32 / total as f32).clamp(0., 1.)
+    }
+}
+
+fn formatted_byte_count(bytes: u64) -> String {
+    const MEBIBYTE: f64 = 1024. * 1024.;
+    const KIBIBYTE: f64 = 1024.;
+
+    if bytes as f64 >= MEBIBYTE {
+        format!("{:.1} MB", bytes as f64 / MEBIBYTE)
+    } else if bytes as f64 >= KIBIBYTE {
+        format!("{:.1} KB", bytes as f64 / KIBIBYTE)
+    } else {
+        format!("{bytes} B")
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeveloperSessionContext {
@@ -157,6 +377,315 @@ pub(crate) async fn load_ipa(path: PathBuf, patches: Vec<PatchOption>) -> AppRes
         .map_err(AppError::from)
 }
 
+pub(crate) async fn install_app(
+    udid: String,
+    signed_app: crate::backend::ipa::SignedAppBundle,
+    mut progress: impl FnMut(InstallAppProgress) + Send + 'static,
+) -> AppResult<()> {
+    crate::backend::device::install_app(udid, signed_app, move |event| {
+        progress(event.into());
+    })
+    .await
+    .map_err(AppError::from)
+}
+
+pub(crate) async fn sign_ipa(
+    request: SignIpaRequest,
+    mut progress: impl FnMut(SignIpaProgress) + Send + 'static,
+) -> AppResult<SignIpaOutcome> {
+    if request.app.bundle_id().trim().is_empty() {
+        return Err(AppError::from(
+            "The app bundle identifier cannot be empty when signing.",
+        ));
+    }
+    if request.app.name().trim().is_empty() {
+        return Err(AppError::from("The app name cannot be empty when signing."));
+    }
+    progress(SignIpaProgress::Preparing);
+    let signing_material = developer_services::load_signing_material(
+        &request.certificate_fingerprint,
+        &request.public_key_fingerprint,
+    )
+    .map_err(AppError::from)?;
+
+    progress(SignIpaProgress::ResolvingAppId);
+    let root_identifier = developer_app_identifier(&request.team_id, request.app.bundle_id());
+    let (app_id, mut updated_account) = resolve_signing_app_id(
+        request.developer_context.clone(),
+        &request.team_id,
+        &request.team_app_ids,
+        request.auto_app_id,
+        request.selected_app_id,
+        &root_identifier,
+        request.app.name(),
+    )
+    .await?;
+    if app_id.developer_id.trim().is_empty() {
+        return Err(AppError::from(
+            "The selected App ID is missing its Xcode identifier. Refresh Developer Settings, then try again.",
+        ));
+    }
+    let expected_identifier = developer_app_identifier(&request.team_id, request.app.bundle_id());
+    if !app_id_matches_identifier(&app_id.identifier, &expected_identifier) {
+        return Err(AppError::from(format!(
+            "App ID {} does not match bundle identifier {}. Select a matching App ID in Developer Settings.",
+            app_id.identifier,
+            request.app.bundle_id()
+        )));
+    }
+
+    let mut team_app_ids = updated_account
+        .as_ref()
+        .and_then(|account| team_app_ids_for_account(account, &request.team_id))
+        .unwrap_or_else(|| request.team_app_ids.clone());
+    let effective_bundle_id = effective_bundle_identifier_for_app(&request.app, &request.team_id);
+    let mut bundle_id_replacements = BTreeMap::from([(
+        request.app.bundle_id().to_string(),
+        effective_bundle_id.clone(),
+    )]);
+    let mut profile_requests = vec![(effective_bundle_id.clone(), app_id.developer_id)];
+
+    for nested_bundle in &request.app.nested_bundles {
+        let effective_nested_bundle_id = effective_nested_bundle_identifier(
+            request.app.original_bundle_id(),
+            request.app.bundle_id(),
+            &nested_bundle.bundle_id,
+            &request.team_id,
+        );
+        let (nested_app_id, account_update) = resolve_signing_app_id(
+            request.developer_context.clone(),
+            &request.team_id,
+            &team_app_ids,
+            true,
+            None,
+            &effective_nested_bundle_id,
+            &nested_bundle.name,
+        )
+        .await?;
+        let expected_identifier = effective_nested_bundle_id.clone();
+        if !app_id_matches_identifier(&nested_app_id.identifier, &expected_identifier) {
+            return Err(AppError::from(format!(
+                "App ID {} does not match nested bundle identifier {}.",
+                nested_app_id.identifier, nested_bundle.bundle_id
+            )));
+        }
+        if nested_app_id.developer_id.trim().is_empty() {
+            return Err(AppError::from(format!(
+                "App ID {} is missing its Xcode identifier.",
+                nested_app_id.identifier
+            )));
+        }
+        if let Some(account) = account_update {
+            team_app_ids = team_app_ids_for_account(&account, &request.team_id)
+                .unwrap_or_else(|| team_app_ids.clone());
+            updated_account = Some(account);
+        }
+        bundle_id_replacements.insert(
+            nested_bundle.bundle_id.clone(),
+            effective_nested_bundle_id.clone(),
+        );
+        profile_requests.push((effective_nested_bundle_id, nested_app_id.developer_id));
+    }
+
+    progress(SignIpaProgress::DownloadingProfile);
+    let mut provisioning_profiles = BTreeMap::new();
+    for (bundle_id, app_id_id) in profile_requests {
+        let profile = download_provisioning_profile(
+            request.developer_context.clone(),
+            request.team_id.clone(),
+            app_id_id,
+        )
+        .await?;
+        provisioning_profiles.insert(bundle_id, profile.bytes);
+    }
+
+    let mut metadata = domain_app_metadata(&request.app);
+    metadata.bundle_id = effective_bundle_id.clone();
+    let destination = match request.output {
+        SignIpaOutput::Ipa(path) => crate::backend::ipa::SigningDestination::Ipa(path),
+        SignIpaOutput::AppBundle => crate::backend::ipa::SigningDestination::AppBundle,
+    };
+    let artifact = crate::backend::ipa::sign_ipa(
+        crate::backend::ipa::IpaSigningRequest {
+            source_path: PathBuf::from(&request.app.path),
+            destination,
+            metadata,
+            bundle_id_replacements,
+            icon_override_path: request.app.icon_override_path.as_deref().map(PathBuf::from),
+            team_id: request.team_id,
+            provisioning_profiles,
+            private_key_pem: signing_material.private_key_pem,
+            certificate_der: signing_material.certificate_der,
+        },
+        move |event| progress(event.into()),
+    )
+    .await
+    .map_err(AppError::from)?;
+    let artifact = match artifact {
+        crate::backend::ipa::SigningArtifact::Ipa(path) => SignIpaArtifact::Ipa(path),
+        crate::backend::ipa::SigningArtifact::AppBundle(app) => SignIpaArtifact::AppBundle(app),
+    };
+
+    Ok(SignIpaOutcome {
+        artifact,
+        updated_account,
+    })
+}
+
+pub(crate) fn app_id_provisioning_plan(
+    team: &TeamOption,
+    auto_app_id: bool,
+    selected_app_id: Option<AppIdOption>,
+    app: &AppOption,
+) -> AppResult<AppIdProvisioningPlan> {
+    let mut missing = BTreeMap::<String, String>::new();
+    let root_identifier = developer_app_identifier(&team.identifier, app.bundle_id());
+
+    if auto_app_id {
+        add_missing_app_id(
+            &mut missing,
+            &team.app_ids,
+            root_identifier,
+            app.name().to_string(),
+        );
+    } else {
+        let selected_app_id = selected_app_id.ok_or_else(|| {
+            AppError::from("Select an App ID in Developer Settings before signing.")
+        })?;
+        if !app_id_matches_identifier(&selected_app_id.identifier, &root_identifier) {
+            return Err(AppError::from(format!(
+                "App ID {} does not match bundle identifier {}. Select a matching App ID in Developer Settings.",
+                selected_app_id.identifier,
+                app.bundle_id()
+            )));
+        }
+    }
+
+    for nested_bundle in &app.nested_bundles {
+        add_missing_app_id(
+            &mut missing,
+            &team.app_ids,
+            effective_nested_bundle_identifier(
+                app.original_bundle_id(),
+                app.bundle_id(),
+                &nested_bundle.bundle_id,
+                &team.identifier,
+            ),
+            nested_bundle.name.clone(),
+        );
+    }
+
+    let app_ids = missing
+        .into_iter()
+        .map(|(identifier, name)| AppIdProvisioningItem { name, identifier })
+        .collect::<Vec<_>>();
+    if let Some(available) = team.app_id_available_quantity {
+        if app_ids.len() as u64 > available {
+            return Err(AppError::from(format!(
+                "Signing requires {} new App IDs, but Apple reports only {available} remaining for {}.",
+                app_ids.len(),
+                team.name
+            )));
+        }
+    }
+
+    Ok(AppIdProvisioningPlan {
+        app_ids,
+        available_quantity: team.app_id_available_quantity,
+    })
+}
+
+fn add_missing_app_id(
+    missing: &mut BTreeMap<String, String>,
+    existing: &[AppIdOption],
+    identifier: String,
+    name: String,
+) {
+    if !existing
+        .iter()
+        .any(|app_id| app_id.identifier == identifier)
+    {
+        missing.entry(identifier).or_insert(name);
+    }
+}
+
+fn team_app_ids_for_account(account: &AccountOption, team_id: &str) -> Option<Vec<AppIdOption>> {
+    account
+        .teams
+        .iter()
+        .find(|team| team.identifier == team_id)
+        .map(|team| team.app_ids.clone())
+}
+
+async fn resolve_signing_app_id(
+    developer_context: DeveloperSessionContext,
+    team_id: &str,
+    team_app_ids: &[AppIdOption],
+    auto_app_id: bool,
+    selected_app_id: Option<AppIdOption>,
+    identifier: &str,
+    app_name: &str,
+) -> AppResult<(AppIdOption, Option<AccountOption>)> {
+    if let Some(app_id) =
+        existing_signing_app_id(team_app_ids, auto_app_id, selected_app_id, identifier)?
+    {
+        return Ok((app_id.clone(), None));
+    }
+
+    let account = add_app_id(
+        developer_context,
+        team_id.to_string(),
+        identifier.to_string(),
+        app_name.to_string(),
+    )
+    .await?;
+    let app_id = account
+        .teams
+        .iter()
+        .find(|team| team.identifier == team_id)
+        .and_then(|team| {
+            team.app_ids
+                .iter()
+                .find(|app_id| app_id.identifier == identifier)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            AppError::from(format!(
+                "Apple created App ID {identifier}, but it was not returned by the developer portal. Refresh Developer Settings and try again."
+            ))
+        })?;
+    Ok((app_id, Some(account)))
+}
+
+fn existing_signing_app_id(
+    team_app_ids: &[AppIdOption],
+    auto_app_id: bool,
+    selected_app_id: Option<AppIdOption>,
+    automatic_identifier: &str,
+) -> AppResult<Option<AppIdOption>> {
+    if !auto_app_id {
+        return selected_app_id.map(Some).ok_or_else(|| {
+            AppError::from("Select an App ID in Developer Settings before signing.")
+        });
+    }
+
+    Ok(team_app_ids
+        .iter()
+        .find(|app_id| app_id.identifier == automatic_identifier)
+        .cloned())
+}
+
+fn developer_app_identifier(team_id: &str, bundle_id: &str) -> String {
+    effective_bundle_identifier(bundle_id.trim(), team_id)
+}
+
+fn app_id_matches_identifier(app_id: &str, expected_identifier: &str) -> bool {
+    app_id == expected_identifier
+        || app_id
+            .strip_suffix('*')
+            .is_some_and(|prefix| expected_identifier.starts_with(prefix))
+}
+
 pub(crate) fn is_ipa_path(path: &Path) -> bool {
     selection::is_ipa_path(path)
 }
@@ -251,6 +780,39 @@ pub(crate) async fn delete_app_id(
         .map_err(AppError::from)
 }
 
+pub(crate) async fn list_developer_devices(
+    context: DeveloperSessionContext,
+    team_id: String,
+) -> AppResult<Vec<DeveloperDeviceOption>> {
+    developer_services::list_developer_devices(context.into_backend(), team_id)
+        .await
+        .map(developer_device_options)
+        .map_err(AppError::from)
+}
+
+pub(crate) async fn add_developer_device(
+    context: DeveloperSessionContext,
+    team_id: String,
+    name: String,
+    udid: String,
+) -> AppResult<Vec<DeveloperDeviceOption>> {
+    developer_services::add_developer_device(context.into_backend(), team_id, name, udid)
+        .await
+        .map(developer_device_options)
+        .map_err(AppError::from)
+}
+
+pub(crate) async fn delete_developer_device(
+    context: DeveloperSessionContext,
+    team_id: String,
+    device_id: String,
+) -> AppResult<Vec<DeveloperDeviceOption>> {
+    developer_services::delete_developer_device(context.into_backend(), team_id, device_id)
+        .await
+        .map(developer_device_options)
+        .map_err(AppError::from)
+}
+
 pub(crate) async fn create_certificate(
     context: DeveloperSessionContext,
     team_id: String,
@@ -299,4 +861,278 @@ pub(crate) async fn download_provisioning_profile(
     developer_services::download_provisioning_profile(context.into_backend(), team_id, app_id_id)
         .await
         .map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::models::{
+        AppMetadata, EntitlementsSource, NestedBundleOption, SupportedDeviceFamily,
+    };
+
+    fn app_id(identifier: &str) -> AppIdOption {
+        AppIdOption {
+            developer_id: format!("xcode-{identifier}"),
+            name: identifier.to_string(),
+            identifier: identifier.to_string(),
+            kind: "Explicit App ID".to_string(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    fn app(bundle_id: &str, nested_bundle_ids: &[&str]) -> AppOption {
+        AppOption {
+            metadata: AppMetadata::sample(
+                "Example",
+                bundle_id,
+                "1.0",
+                "1",
+                "Example",
+                "15.0",
+                vec![SupportedDeviceFamily::IPhone],
+            ),
+            nested_bundles: nested_bundle_ids
+                .iter()
+                .map(|bundle_id| NestedBundleOption {
+                    name: bundle_id.rsplit('.').next().unwrap().to_string(),
+                    bundle_id: (*bundle_id).to_string(),
+                })
+                .collect(),
+            path: "/tmp/Example.ipa".to_string(),
+            icon_path: None,
+            icon_override_path: None,
+            entitlements: Vec::new(),
+            entitlements_source: EntitlementsSource::GeneratedFallback,
+            entitlement_overrides: None,
+            patches: Vec::new(),
+        }
+    }
+
+    fn team(app_ids: Vec<AppIdOption>, available: Option<u64>) -> TeamOption {
+        TeamOption {
+            name: "Example Team".to_string(),
+            identifier: "TEAM".to_string(),
+            role: "Admin".to_string(),
+            app_id_available_quantity: available,
+            app_id_max_quantity: Some(10),
+            app_ids,
+            certificates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn automatic_app_id_uses_exact_team_suffixed_match() {
+        let app_ids = vec![
+            app_id("com.example.other.TEAM"),
+            app_id("com.example.app.TEAM"),
+        ];
+
+        let selected = existing_signing_app_id(
+            &app_ids,
+            true,
+            Some(app_ids[0].clone()),
+            "com.example.app.TEAM",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(selected.identifier, "com.example.app.TEAM");
+    }
+
+    #[test]
+    fn automatic_app_id_requests_creation_when_exact_match_is_missing() {
+        let app_ids = vec![app_id("com.example.other.TEAM")];
+
+        assert!(
+            existing_signing_app_id(&app_ids, true, None, "com.example.app.TEAM")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn manual_app_id_requires_and_uses_selection() {
+        let selected = app_id("com.example.manual.TEAM");
+        assert_eq!(
+            existing_signing_app_id(&[], false, Some(selected), "ignored")
+                .unwrap()
+                .unwrap()
+                .identifier,
+            "com.example.manual.TEAM"
+        );
+        assert!(existing_signing_app_id(&[], false, None, "ignored").is_err());
+    }
+
+    #[test]
+    fn developer_identifier_is_suffixed_only_once() {
+        assert_eq!(
+            developer_app_identifier("TEAM", "com.example.app"),
+            "com.example.app.TEAM"
+        );
+        assert_eq!(
+            developer_app_identifier("TEAM", "com.example.app.TEAM"),
+            "com.example.app.TEAM"
+        );
+    }
+
+    #[test]
+    fn app_id_matching_accepts_exact_and_wildcard_identifiers() {
+        assert!(app_id_matches_identifier(
+            "TEAM.com.example.app",
+            "TEAM.com.example.app"
+        ));
+        assert!(app_id_matches_identifier(
+            "TEAM.com.example.*",
+            "TEAM.com.example.app"
+        ));
+        assert!(!app_id_matches_identifier(
+            "TEAM.com.other.app",
+            "TEAM.com.example.app"
+        ));
+    }
+
+    #[test]
+    fn provisioning_plan_counts_unique_missing_root_and_nested_app_ids() {
+        let app = app(
+            "com.example.app",
+            &[
+                "com.example.app.widget",
+                "com.example.app.widget",
+                "com.example.app.share",
+            ],
+        );
+        let team = team(vec![app_id("com.example.app.TEAM.widget")], Some(5));
+
+        let plan = app_id_provisioning_plan(&team, true, None, &app).unwrap();
+
+        assert_eq!(
+            plan.app_ids
+                .iter()
+                .map(|app_id| app_id.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["com.example.app.TEAM", "com.example.app.TEAM.share"]
+        );
+        assert_eq!(plan.available_quantity, Some(5));
+        assert_eq!(plan.remaining_after_signing(), Some(3));
+    }
+
+    #[test]
+    fn provisioning_plan_rebases_nested_ids_when_root_bundle_id_is_overridden() {
+        let mut app = app("com.example.app", &["com.example.app.SubApp.Extension"]);
+        app.metadata
+            .bundle_id
+            .set_override("altcom.example.app".to_string());
+
+        let plan = app_id_provisioning_plan(&team(Vec::new(), Some(5)), true, None, &app).unwrap();
+
+        assert_eq!(
+            plan.app_ids
+                .iter()
+                .map(|app_id| app_id.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "altcom.example.app.TEAM",
+                "altcom.example.app.TEAM.SubApp.Extension",
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_plan_does_not_create_manually_selected_root_app_id() {
+        let app = app("com.example.app", &["com.example.app.widget"]);
+        let selected = app_id("com.example.app.TEAM");
+        let team = team(vec![selected.clone()], Some(4));
+
+        let plan = app_id_provisioning_plan(&team, false, Some(selected), &app).unwrap();
+
+        assert_eq!(plan.app_ids.len(), 1);
+        assert_eq!(plan.app_ids[0].identifier, "com.example.app.TEAM.widget");
+    }
+
+    #[test]
+    fn provisioning_plan_rejects_insufficient_refreshed_quota() {
+        let app = app("com.example.app", &["com.example.app.widget"]);
+        let error =
+            app_id_provisioning_plan(&team(Vec::new(), Some(1)), true, None, &app).unwrap_err();
+
+        assert!(error.user_message().contains("requires 2 new App IDs"));
+        assert!(error.user_message().contains("only 1 remaining"));
+    }
+
+    #[test]
+    fn signing_progress_is_monotonic_across_pipeline_stages() {
+        let events = [
+            SignIpaProgress::Preparing,
+            SignIpaProgress::ResolvingAppId,
+            SignIpaProgress::DownloadingProfile,
+            SignIpaProgress::Extracting {
+                completed: 0,
+                total: 10,
+            },
+            SignIpaProgress::Extracting {
+                completed: 10,
+                total: 10,
+            },
+            SignIpaProgress::Patching,
+            SignIpaProgress::Signing,
+            SignIpaProgress::Packaging {
+                completed: 0,
+                total: 20,
+            },
+            SignIpaProgress::Packaging {
+                completed: 20,
+                total: 20,
+            },
+            SignIpaProgress::Saving,
+            SignIpaProgress::Ready,
+        ];
+        let values = events.map(SignIpaProgress::progress);
+
+        assert!(values.windows(2).all(|window| window[0] <= window[1]));
+        assert_eq!(SignIpaProgress::Saving.progress(), 0.98);
+        assert_eq!(
+            SignIpaProgress::Extracting {
+                completed: 4,
+                total: 10
+            }
+            .label(),
+            "Extracting IPA (4/10)"
+        );
+    }
+
+    #[test]
+    fn installation_progress_is_monotonic_and_reports_transfer_size() {
+        let events = [
+            InstallAppProgress::Connecting,
+            InstallAppProgress::Uploading {
+                transferred_bytes: 0,
+                total_bytes: 10 * 1024 * 1024,
+                completed_files: 0,
+                total_files: 20,
+            },
+            InstallAppProgress::Uploading {
+                transferred_bytes: 10 * 1024 * 1024,
+                total_bytes: 10 * 1024 * 1024,
+                completed_files: 20,
+                total_files: 20,
+            },
+            InstallAppProgress::Installing { percent: 0 },
+            InstallAppProgress::Installing { percent: 100 },
+            InstallAppProgress::Finalizing,
+        ];
+        let values = events.map(InstallAppProgress::progress);
+
+        assert!(values.windows(2).all(|window| window[0] <= window[1]));
+        assert_eq!(InstallAppProgress::Finalizing.progress(), 0.99);
+        assert_eq!(
+            InstallAppProgress::Uploading {
+                transferred_bytes: 5 * 1024 * 1024,
+                total_bytes: 10 * 1024 * 1024,
+                completed_files: 10,
+                total_files: 20,
+            }
+            .label(),
+            "Uploading app files (10/20, 5.0 MB / 10.0 MB)"
+        );
+    }
 }

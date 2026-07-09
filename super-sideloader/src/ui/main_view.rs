@@ -18,11 +18,34 @@ use crate::ui::widgets::{
 use futures::{channel::mpsc, StreamExt};
 use gpui::{
     div, prelude::*, px, App, ClickEvent, Context, ExternalPaths, FocusHandle, FontWeight,
-    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, Window,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, PromptButton, PromptLevel,
+    Render, Styled, Window,
 };
 use gpui_component::button::Button;
+use gpui_component::text::TextView;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const SIDELOAD_SIGNING_WEIGHT: f32 = 0.72;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SigningAction {
+    Save,
+    Sideload,
+}
+
+impl SigningAction {
+    fn installs_after_signing(self) -> bool {
+        self == Self::Sideload
+    }
+
+    fn confirmation_label(self) -> &'static str {
+        match self {
+            Self::Save => "Create and Sign",
+            Self::Sideload => "Create and Sideload",
+        }
+    }
+}
 
 pub(crate) struct SideloaderView {
     pub(crate) focus_handle: FocusHandle,
@@ -300,6 +323,7 @@ impl SideloaderView {
         if self.device_selection.select(index) {
             self.open_picker = None;
             self.save_preferences();
+            self.sync_developer_settings_window(cx);
             cx.notify();
         }
     }
@@ -448,33 +472,508 @@ impl SideloaderView {
         .detach();
     }
 
-    fn sideload(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn sideload(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_signing(SigningAction::Sideload, event, window, cx);
+    }
+
+    fn sign(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_signing(SigningAction::Save, event, window, cx);
+    }
+
+    fn start_signing(
+        &mut self,
+        action: SigningAction,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus_handle, cx);
         if self.is_busy()
             || self.selected_account().is_none()
             || self.selected_app().is_none()
-            || self.selected_device().is_none()
+            || (action.installs_after_signing() && self.selected_device().is_none())
         {
             return;
         }
-        self.start_signing_operation(cx);
-    }
 
-    fn sign(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle, cx);
-        if self.is_busy() || self.selected_account().is_none() || self.selected_app().is_none() {
+        let Some(account) = self.selected_account().cloned() else {
+            return;
+        };
+        let Some(team) = account.teams.get(self.selected_team).cloned() else {
+            self.fail_signing_and_open_developer_settings(
+                "Select a developer team before signing.",
+                event,
+                window,
+                cx,
+            );
+            return;
+        };
+        let Some(certificate) = team.certificates.get(self.selected_certificate).cloned() else {
+            self.fail_signing_and_open_developer_settings(
+                "Create a development certificate in Developer Settings before signing.",
+                event,
+                window,
+                cx,
+            );
+            return;
+        };
+        if !certificate.private_key_available {
+            self.fail_signing_and_open_developer_settings(
+                "Import the selected certificate's PEM private key in Developer Settings before signing.",
+                event,
+                window,
+                cx,
+            );
             return;
         }
-        self.start_signing_operation(cx);
+        let Some(certificate_fingerprint) = certificate.certificate_fingerprint.clone() else {
+            self.fail_signing_and_open_developer_settings(
+                "Refresh Developer Settings to cache the selected certificate before signing.",
+                event,
+                window,
+                cx,
+            );
+            return;
+        };
+        let Some(public_key_fingerprint) = certificate.public_key_fingerprint.clone() else {
+            self.fail_signing_and_open_developer_settings(
+                "Refresh Developer Settings to inspect the selected certificate before signing.",
+                event,
+                window,
+                cx,
+            );
+            return;
+        };
+        let selected_app_id = team.app_ids.get(self.selected_app_id).cloned();
+        if !self.auto_app_id && selected_app_id.is_none() {
+            self.fail_signing_and_open_developer_settings(
+                "Select an App ID in Developer Settings before signing.",
+                event,
+                window,
+                cx,
+            );
+            return;
+        }
+        let developer_context = match self.selected_developer_context() {
+            Ok(context) => context,
+            Err(error) => {
+                self.sideload_operation = SideloadOperation::Failed { message: error };
+                cx.notify();
+                return;
+            }
+        };
+        let app = self
+            .selected_app()
+            .cloned()
+            .expect("selected app checked above");
+        let selected_device = action
+            .installs_after_signing()
+            .then(|| self.selected_device().cloned())
+            .flatten();
+        let app_name = app.name().to_string();
+        let (directory, suggested_name) = signed_ipa_destination(&app.path);
+        let destination_receiver = if action == SigningAction::Save {
+            Some(cx.prompt_for_new_path(&directory, Some(&suggested_name)))
+        } else {
+            None
+        };
+        let auto_app_id = self.auto_app_id;
+        let team_id = team.identifier;
+        let selected_app_id_identifier = selected_app_id
+            .as_ref()
+            .map(|app_id| app_id.identifier.clone());
+        self.open_picker = None;
+        let (progress_sender, mut progress_receiver) = mpsc::unbounded();
+        cx.spawn(async move |view, cx| {
+            while let Some(event) = progress_receiver.next().await {
+                let _ = view.update(cx, |view, cx| {
+                    view.set_signing_progress(event, action.installs_after_signing());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        let (install_progress_sender, mut install_progress_receiver) = mpsc::unbounded();
+        cx.spawn(async move |view, cx| {
+            while let Some(event) = install_progress_receiver.next().await {
+                let _ = view.update(cx, |view, cx| {
+                    view.set_installing_progress(event);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+
+        cx.spawn_in(window, async move |view, cx| {
+            let signing_output = if let Some(receiver) = destination_receiver {
+                match receiver.await {
+                    Ok(Ok(Some(path))) => app_effects::SignIpaOutput::Ipa(path),
+                    Ok(Ok(None)) | Err(_) => return,
+                    Ok(Err(error)) => {
+                        let _ = view.update(cx, |view, cx| {
+                            view.sideload_operation = SideloadOperation::Failed {
+                                message: format!(
+                                    "Failed to choose a signed IPA destination: {error}"
+                                ),
+                            };
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            } else {
+                app_effects::SignIpaOutput::AppBundle
+            };
+
+            let _ = view.update(cx, |view, cx| {
+                view.sideload_operation = SideloadOperation::Running {
+                    phase: SideloadPhase::Signing,
+                    progress: 0.02,
+                    detail: "Refreshing App IDs".to_string(),
+                };
+                cx.notify();
+            });
+
+            let refreshed_account = match cx
+                .background_spawn(app_effects::refresh_account(developer_context.clone()))
+                .await
+            {
+                Ok(account) => account,
+                Err(error) => {
+                    let _ = view.update(cx, |view, cx| {
+                        view.sideload_operation = SideloadOperation::Failed {
+                            message: format!(
+                                "Could not refresh App IDs before signing: {}",
+                                error.user_message()
+                            ),
+                        };
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(refreshed_team) = refreshed_account
+                .teams
+                .iter()
+                .find(|team| team.identifier == team_id)
+                .cloned()
+            else {
+                let _ = view.update(cx, |view, cx| {
+                    view.sideload_operation = SideloadOperation::Failed {
+                        message: "The selected developer team was not returned by Apple."
+                            .to_string(),
+                    };
+                    cx.notify();
+                });
+                return;
+            };
+            if let Some(device) = selected_device.as_ref() {
+                let _ = view.update(cx, |view, cx| {
+                    view.sideload_operation = SideloadOperation::Running {
+                        phase: SideloadPhase::Signing,
+                        progress: 0.03,
+                        detail: "Checking device registration".to_string(),
+                    };
+                    cx.notify();
+                });
+                let registered_devices = match cx
+                    .background_spawn(app_effects::list_developer_devices(
+                        developer_context.clone(),
+                        team_id.clone(),
+                    ))
+                    .await
+                {
+                    Ok(devices) => devices,
+                    Err(error) => {
+                        let _ = view.update(cx, |view, cx| {
+                            view.sideload_operation = SideloadOperation::Failed {
+                                message: format!(
+                                    "Could not check whether {} is registered with Apple: {}",
+                                    device.name,
+                                    error.user_message()
+                                ),
+                            };
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+                let device_is_registered = registered_devices.iter().any(|registered| {
+                    registered
+                        .udid
+                        .trim()
+                        .eq_ignore_ascii_case(device.udid.trim())
+                });
+                if !device_is_registered {
+                    let _ = view.update(cx, |view, cx| {
+                        view.sideload_operation = SideloadOperation::Running {
+                            phase: SideloadPhase::Signing,
+                            progress: 0.035,
+                            detail: format!("Registering {} with Apple", device.name),
+                        };
+                        cx.notify();
+                    });
+                    if let Err(error) = cx
+                        .background_spawn(app_effects::add_developer_device(
+                            developer_context.clone(),
+                            team_id.clone(),
+                            device.name.clone(),
+                            device.udid.clone(),
+                        ))
+                        .await
+                    {
+                        let _ = view.update(cx, |view, cx| {
+                            view.sideload_operation = SideloadOperation::Failed {
+                                message: format!(
+                                    "Could not register {} with Apple: {}",
+                                    device.name,
+                                    error.user_message()
+                                ),
+                            };
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+            let refreshed_selected_app_id = selected_app_id_identifier.as_deref().and_then(|id| {
+                refreshed_team
+                    .app_ids
+                    .iter()
+                    .find(|app_id| app_id.identifier == id)
+                    .cloned()
+            });
+            let plan = match app_effects::app_id_provisioning_plan(
+                &refreshed_team,
+                auto_app_id,
+                refreshed_selected_app_id.clone(),
+                &app,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    let _ = view.update(cx, |view, cx| {
+                        view.state
+                            .replace_developer_account_preserving_selection(refreshed_account);
+                        view.save_preferences();
+                        view.sync_settings_windows(cx);
+                        view.sideload_operation = SideloadOperation::Failed {
+                            message: error.user_message(),
+                        };
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let _ = view.update(cx, |view, cx| {
+                view.state
+                    .replace_developer_account_preserving_selection(refreshed_account);
+                view.save_preferences();
+                view.sync_settings_windows(cx);
+                cx.notify();
+            });
+
+            if plan.app_ids.len() > 1 {
+                let (message, detail) = app_id_provisioning_prompt(&plan);
+                let prompt = match view.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &message,
+                        Some(&detail),
+                        &[
+                            PromptButton::new(action.confirmation_label()),
+                            PromptButton::Cancel("Cancel".into()),
+                        ],
+                        cx,
+                    )
+                }) {
+                    Ok(prompt) => prompt,
+                    Err(_) => return,
+                };
+                if prompt.await != Ok(0) {
+                    let _ = view.update(cx, |view, cx| {
+                        view.sideload_operation = SideloadOperation::Idle;
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+
+            let _ = view.update(cx, |view, cx| {
+                view.sideload_operation = SideloadOperation::Running {
+                    phase: SideloadPhase::Signing,
+                    progress: 0.04,
+                    detail: "Preparing signing resources".to_string(),
+                };
+                cx.notify();
+            });
+            let request = app_effects::SignIpaRequest {
+                developer_context,
+                team_id,
+                team_app_ids: refreshed_team.app_ids,
+                certificate_fingerprint,
+                public_key_fingerprint,
+                auto_app_id,
+                selected_app_id: refreshed_selected_app_id,
+                app,
+                output: signing_output,
+            };
+            let result = cx
+                .background_spawn(async move {
+                    app_effects::sign_ipa(request, move |event| {
+                        let _ = progress_sender.unbounded_send(event);
+                    })
+                    .await
+                    .map_err(|error| error.user_message())
+                })
+                .await;
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(message) => {
+                    let _ = view.update(cx, |view, cx| {
+                        view.sideload_operation = SideloadOperation::Failed { message };
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let app_effects::SignIpaOutcome {
+                artifact,
+                updated_account,
+            } = outcome;
+
+            let _ = view.update(cx, |view, cx| {
+                if let Some(account) = updated_account {
+                    view.state
+                        .replace_developer_account_preserving_selection(account);
+                    view.save_preferences();
+                    view.sync_settings_windows(cx);
+                }
+                cx.notify();
+            });
+            if action == SigningAction::Save {
+                let app_effects::SignIpaArtifact::Ipa(output_path) = artifact else {
+                    let _ = view.update(cx, |view, cx| {
+                        view.sideload_operation = SideloadOperation::Failed {
+                            message: "Signing completed without producing an IPA.".to_string(),
+                        };
+                        cx.notify();
+                    });
+                    return;
+                };
+                let file_name = output_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("signed IPA");
+                let _ = view.update(cx, |view, cx| {
+                    view.sideload_operation = SideloadOperation::Finished {
+                        message: format!("Signed {file_name}"),
+                    };
+                    cx.notify();
+                });
+                return;
+            }
+
+            let app_effects::SignIpaArtifact::AppBundle(signed_app) = artifact else {
+                let _ = view.update(cx, |view, cx| {
+                    view.sideload_operation = SideloadOperation::Failed {
+                        message: "Signing unexpectedly produced an IPA for sideloading."
+                            .to_string(),
+                    };
+                    cx.notify();
+                });
+                return;
+            };
+
+            let device = selected_device.expect("sideload device selected above");
+            let _ = view.update(cx, |view, cx| {
+                view.sideload_operation = SideloadOperation::Running {
+                    phase: SideloadPhase::Installing,
+                    progress: SIDELOAD_SIGNING_WEIGHT,
+                    detail: format!("Connecting to {}", device.name),
+                };
+                cx.notify();
+            });
+            let install_result = cx
+                .background_spawn(app_effects::install_app(
+                    device.udid.clone(),
+                    signed_app,
+                    move |event| {
+                        let _ = install_progress_sender.unbounded_send(event);
+                    },
+                ))
+                .await
+                .map_err(|error| error.user_message());
+
+            let _ = view.update(cx, |view, cx| {
+                view.sideload_operation = match install_result {
+                    Ok(()) => SideloadOperation::Finished {
+                        message: format!("Installed {app_name} on {}", device.name),
+                    },
+                    Err(message) => SideloadOperation::Failed { message },
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    fn start_signing_operation(&mut self, cx: &mut Context<Self>) {
-        self.open_picker = None;
+    fn fail_signing_and_open_developer_settings(
+        &mut self,
+        message: &str,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sideload_operation = SideloadOperation::Failed {
+            message: message.to_string(),
+        };
+        self.open_team_settings(event, window, cx);
+    }
+
+    fn set_signing_progress(
+        &mut self,
+        event: app_effects::SignIpaProgress,
+        installs_after_signing: bool,
+    ) {
+        let SideloadOperation::Running {
+            phase: SideloadPhase::Signing,
+            progress: current_progress,
+            ..
+        } = &self.sideload_operation
+        else {
+            return;
+        };
+        let next_progress = if installs_after_signing {
+            event.progress() * SIDELOAD_SIGNING_WEIGHT
+        } else {
+            event.progress()
+        };
+        let progress = next_progress.max(*current_progress);
         self.sideload_operation = SideloadOperation::Running {
             phase: SideloadPhase::Signing,
-            progress: 0.34,
+            progress,
+            detail: event.label(),
         };
-        cx.notify();
+    }
+
+    fn set_installing_progress(&mut self, event: app_effects::InstallAppProgress) {
+        let SideloadOperation::Running {
+            phase: SideloadPhase::Installing,
+            progress: current_progress,
+            ..
+        } = &self.sideload_operation
+        else {
+            return;
+        };
+        let next_progress =
+            SIDELOAD_SIGNING_WEIGHT + event.progress() * (1. - SIDELOAD_SIGNING_WEIGHT);
+        self.sideload_operation = SideloadOperation::Running {
+            phase: SideloadPhase::Installing,
+            progress: next_progress.max(*current_progress),
+            detail: event.label(),
+        };
     }
 
     fn refresh_devices_from_button(
@@ -544,6 +1043,7 @@ impl SideloaderView {
                 .await;
             let _ = view.update(cx, |view, cx| {
                 view.finish_device_refresh(generation, result);
+                view.sync_developer_settings_window(cx);
                 cx.notify();
             });
         })
@@ -1200,6 +1700,26 @@ impl SideloaderView {
             selected_app,
             self.selected_device(),
         );
+        let status_label = if matches!(self.sideload_operation, SideloadOperation::Failed { .. }) {
+            TextView::markdown("sideload-error-text", escape_markdown_text(&status_text))
+                .selectable(true)
+                .w(px(SIDELOAD_BUTTON_WIDTH))
+                .text_center()
+                .text_xs()
+                .line_height(px(16.))
+                .text_color(rgb(status_color))
+                .into_any_element()
+        } else {
+            div()
+                .w(px(SIDELOAD_BUTTON_WIDTH))
+                .text_center()
+                .text_xs()
+                .line_height(px(16.))
+                .text_color(rgb(status_color))
+                .whitespace_normal()
+                .child(status_text)
+                .into_any_element()
+        };
 
         div()
             .w(px(SIDELOAD_CONNECTOR_WIDTH))
@@ -1245,7 +1765,7 @@ impl SideloaderView {
             )
             .child(
                 div()
-                    .h(px(SIDELOAD_STATUS_HEIGHT))
+                    .min_h(px(SIDELOAD_STATUS_HEIGHT))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1270,15 +1790,7 @@ impl SideloaderView {
                                             .bg(rgb(status_color)),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .w(px(SIDELOAD_BUTTON_WIDTH))
-                                    .text_center()
-                                    .text_xs()
-                                    .text_color(rgb(status_color))
-                                    .text_ellipsis()
-                                    .child(status_text),
-                            ),
+                            .child(status_label),
                     )
                     .child(div().flex_none().w_6()),
             )
@@ -1509,7 +2021,7 @@ fn sideload_top_label(operation: &SideloadOperation) -> &'static str {
     match operation {
         SideloadOperation::Idle => "Draft",
         SideloadOperation::Running { phase, .. } => sideload_phase_label(*phase),
-        SideloadOperation::Finished => "Done",
+        SideloadOperation::Finished { .. } => "Done",
         SideloadOperation::Failed { .. } => "Failed",
     }
 }
@@ -1518,7 +2030,7 @@ fn sideload_status_color(operation: &SideloadOperation) -> u32 {
     match operation {
         SideloadOperation::Idle => 0x53666d,
         SideloadOperation::Running { .. } => 0x173f45,
-        SideloadOperation::Finished => 0x1d6b45,
+        SideloadOperation::Finished { .. } => 0x1d6b45,
         SideloadOperation::Failed { .. } => 0x9a302b,
     }
 }
@@ -1526,7 +2038,7 @@ fn sideload_status_color(operation: &SideloadOperation) -> u32 {
 fn sideload_button_label(operation: &SideloadOperation) -> &'static str {
     match operation {
         SideloadOperation::Idle
-        | SideloadOperation::Finished
+        | SideloadOperation::Finished { .. }
         | SideloadOperation::Failed { .. } => "Sideload",
         SideloadOperation::Running { phase, .. } => sideload_phase_label(*phase),
     }
@@ -1550,26 +2062,60 @@ fn sideload_status_text(
                 "Ready to sign".to_string()
             }
         }
-        SideloadOperation::Running { phase, .. } => match phase {
-            SideloadPhase::Signing => {
-                let app_name = app.map(|app| app.name().as_str()).unwrap_or("app");
-                format!("Signing {app_name}")
+        SideloadOperation::Running {
+            phase,
+            progress,
+            detail,
+        } => {
+            if !detail.is_empty() {
+                format!("{detail} - {:.0}%", progress.clamp(0., 1.) * 100.)
+            } else {
+                match phase {
+                    SideloadPhase::Signing => {
+                        let app_name = app.map(|app| app.name().as_str()).unwrap_or("app");
+                        format!("Signing {app_name}")
+                    }
+                    SideloadPhase::Installing => {
+                        let device_name = device
+                            .map(|device| device.name.as_str())
+                            .unwrap_or("device");
+                        format!("Installing to {device_name}")
+                    }
+                }
             }
-            SideloadPhase::Installing => {
-                let device_name = device
-                    .map(|device| device.name.as_str())
-                    .unwrap_or("device");
-                format!("Installing to {device_name}")
-            }
-        },
-        SideloadOperation::Finished => {
-            let device_name = device
-                .map(|device| device.name.as_str())
-                .unwrap_or("device");
-            format!("Installed on {device_name}")
         }
+        SideloadOperation::Finished { message } => message.clone(),
         SideloadOperation::Failed { message } => message.clone(),
     }
+}
+
+fn escape_markdown_text(text: &str) -> String {
+    text.chars()
+        .flat_map(|character| {
+            if matches!(
+                character,
+                '\\' | '`'
+                    | '*'
+                    | '_'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '<'
+                    | '>'
+                    | '#'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '!'
+                    | '|'
+            ) {
+                vec!['\\', character]
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
 }
 
 fn sideload_phase_label(phase: SideloadPhase) -> &'static str {
@@ -1585,6 +2131,43 @@ fn first_ipa_path(paths: &ExternalPaths) -> Option<PathBuf> {
         .iter()
         .find(|path| app_effects::is_ipa_path(path))
         .cloned()
+}
+
+fn signed_ipa_destination(app_path: &str) -> (PathBuf, String) {
+    let path = Path::new(app_path);
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("app");
+    (directory, format!("{stem}-signed.ipa"))
+}
+
+fn app_id_provisioning_prompt(plan: &app_effects::AppIdProvisioningPlan) -> (String, String) {
+    let count = plan.app_ids.len();
+    let message = format!("Create {count} App IDs before signing?");
+    let mut detail = format!(
+        "Super Sideloader needs to add these App IDs:\n\n{}",
+        plan.app_ids
+            .iter()
+            .map(|app_id| format!("- {} ({})", app_id.name, app_id.identifier))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    if let Some(available) = plan.available_quantity {
+        let remaining = plan.remaining_after_signing().unwrap_or_default();
+        detail.push_str(&format!(
+            "\n\nApple currently reports {available} App IDs remaining. {remaining} will remain after these are created."
+        ));
+    } else {
+        detail.push_str("\n\nApple did not report the remaining App ID quota.");
+    }
+    (message, detail)
 }
 
 fn paths_include_ipa(paths: &ExternalPaths) -> bool {

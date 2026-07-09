@@ -1,6 +1,7 @@
 use crate::backend::developer::accounts;
+use crate::backend::developer::certificates::{self, AppManagedSigningMaterial};
 use crate::backend::BackendResult;
-use crate::domain::{AdiBackendKind, DeveloperAccount, MachineIdentity};
+use crate::domain::{AdiBackendKind, DeveloperAccount, DeveloperDevice, MachineIdentity};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -64,6 +65,13 @@ pub(crate) fn load_cached_accounts() -> BackendResult<Vec<DeveloperAccount>> {
 
 pub(crate) fn delete_account_cache(account_id: &str) -> BackendResult<()> {
     accounts::delete_account_cache(account_id)
+}
+
+pub(crate) fn load_signing_material(
+    certificate_fingerprint: &str,
+    public_key_fingerprint: &str,
+) -> BackendResult<AppManagedSigningMaterial> {
+    certificates::load_app_managed_signing_material(certificate_fingerprint, public_key_fingerprint)
 }
 
 pub(crate) async fn login(request: DeveloperLoginRequest) -> BackendResult<DeveloperLoginOutcome> {
@@ -147,6 +155,60 @@ pub(crate) async fn delete_app_id(
         email: request.email,
         team_id,
         app_id_id,
+        adi_backend: request.adi_backend,
+        machine_identity: request.machine_identity,
+        android_adi_identifier: request.android_adi_identifier,
+    })
+    .await
+}
+
+pub(crate) async fn list_developer_devices(
+    context: DeveloperSessionContext,
+    team_id: String,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    let request = context.refresh_request();
+    accounts::list_developer_devices(accounts::DeveloperDeviceListRequest {
+        account_id: request.account_id,
+        email: request.email,
+        team_id,
+        adi_backend: request.adi_backend,
+        machine_identity: request.machine_identity,
+        android_adi_identifier: request.android_adi_identifier,
+    })
+    .await
+}
+
+pub(crate) async fn add_developer_device(
+    context: DeveloperSessionContext,
+    team_id: String,
+    name: String,
+    udid: String,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    let request = context.refresh_request();
+    accounts::add_developer_device(accounts::DeveloperDeviceAddRequest {
+        account_id: request.account_id,
+        email: request.email,
+        team_id,
+        name,
+        udid,
+        adi_backend: request.adi_backend,
+        machine_identity: request.machine_identity,
+        android_adi_identifier: request.android_adi_identifier,
+    })
+    .await
+}
+
+pub(crate) async fn delete_developer_device(
+    context: DeveloperSessionContext,
+    team_id: String,
+    device_id: String,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    let request = context.refresh_request();
+    accounts::delete_developer_device(accounts::DeveloperDeviceDeleteRequest {
+        account_id: request.account_id,
+        email: request.email,
+        team_id,
+        device_id,
         adi_backend: request.adi_backend,
         machine_identity: request.machine_identity,
         android_adi_identifier: request.android_adi_identifier,

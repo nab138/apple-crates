@@ -70,11 +70,14 @@ pub(super) fn render(props: AppViewProps<'_>, cx: &mut Context<SettingsWindow>) 
                                     app_detail_edit,
                                     cx,
                                 ))
-                                .child(app_detail_row(
+                                .child(app_detail_row_with_display_value(
                                     AppMetadataField::BundleId,
                                     app,
                                     true,
                                     app_detail_edit,
+                                    crate::app::entitlements::effective_bundle_identifier_for_app(
+                                        app, team_id,
+                                    ),
                                     cx,
                                 ))
                                 .child(app_detail_row(
@@ -211,8 +214,33 @@ fn app_detail_row(
     edit: Option<&AppDetailEdit>,
     cx: &mut Context<SettingsWindow>,
 ) -> gpui::Div {
+    app_detail_row_inner(field, app, editable, edit, None, cx)
+}
+
+fn app_detail_row_with_display_value(
+    field: AppMetadataField,
+    app: &AppOption,
+    editable: bool,
+    edit: Option<&AppDetailEdit>,
+    display_value: String,
+    cx: &mut Context<SettingsWindow>,
+) -> gpui::Div {
+    app_detail_row_inner(field, app, editable, edit, Some(display_value), cx)
+}
+
+fn app_detail_row_inner(
+    field: AppMetadataField,
+    app: &AppOption,
+    editable: bool,
+    edit: Option<&AppDetailEdit>,
+    display_value: Option<String>,
+    cx: &mut Context<SettingsWindow>,
+) -> gpui::Div {
     let is_editing = edit.is_some_and(|edit| edit.field() == field);
     let changed = app.field_is_overridden(field);
+    let effective_changed = display_value
+        .as_deref()
+        .is_some_and(|value| value != app.field_display_value(field));
 
     div()
         .min_w_0()
@@ -241,9 +269,13 @@ fn app_detail_row(
                     .min_w_0()
                     .flex_1()
                     .text_sm()
-                    .text_color(rgb(if changed { 0x173f45 } else { 0x405057 }))
+                    .text_color(rgb(if changed || effective_changed {
+                        0x173f45
+                    } else {
+                        0x405057
+                    }))
                     .text_ellipsis()
-                    .child(app.field_display_value(field))
+                    .child(display_value.unwrap_or_else(|| app.field_display_value(field)))
             },
         )
         .when(editable, |this| {

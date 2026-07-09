@@ -6,28 +6,35 @@ edition = "2021"
 [dependencies]
 adi.workspace = true
 android-coreadi.workspace = true
-async_zip = { version = "0.0.18", features = ["deflate", "tokio-fs"] }
+apple-codesign = { path = "../apple-codesign-quick" }
+async_zip = { version = "0.0.18", features = ["deflate", "tokio", "tokio-fs"] }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+crc32fast = "1.5"
 directories = "6.0.0"
 env_logger = "0.11.8"
+flate2 = "1.1"
 futures-lite = "2.6.1"
 grandslam.workspace = true
 gpui = { package = "gpui", git = "https://github.com/gpui-ce/gpui-ce" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "277f220a6196572116a8fd84fba6c36187094cab" }
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-idevice = { version = "0.1.64", features = ["usbmuxd"] }
+idevice = { version = "0.1.64", features = ["afc", "installation_proxy", "usbmuxd"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 log = "0.4.33"
 plist.workspace = true
+pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 rand = "0.10.2"
 reqwest = { workspace = true, features = ["blocking"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha1.workspace = true
 thiserror.workspace = true
+tempfile = "3.27"
 toml = "0.8.23"
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 uuid = { version = "1.19", features = ["v4"] }
+walkdir = "2.5"
 xcode.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

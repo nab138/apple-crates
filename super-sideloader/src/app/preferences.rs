@@ -311,6 +311,7 @@ mod tests {
                 "16.0",
                 vec![SupportedDeviceFamily::IPhone],
             ),
+            nested_bundles: Vec::new(),
             path: "/tmp/App.ipa".to_string(),
             icon_path: None,
             icon_override_path: None,

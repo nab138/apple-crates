@@ -8,8 +8,8 @@ use crate::app::effects::{
 };
 use crate::app::models::{
     AccountOption, AdiBackendKind, AdiBackendOption, AdiProvisioningState, AppEntitlement,
-    AppIdOption, AppMetadataField, AppOption, DevelopmentCertificateOption, EntitlementValue,
-    MachineIdentity, SupportedDeviceFamily, TeamOption,
+    AppIdOption, AppMetadataField, AppOption, DeveloperDeviceOption, DevelopmentCertificateOption,
+    DeviceOption, EntitlementValue, MachineIdentity, SupportedDeviceFamily, TeamOption,
 };
 use crate::app::preferences::ThemePreference;
 use crate::app::state::SideloaderState;
@@ -62,6 +62,7 @@ struct TeamSettingsSnapshot {
     selected_certificate: usize,
     auto_app_id: bool,
     selected_app_id: usize,
+    selected_device: Option<DeviceOption>,
 }
 
 #[derive(Clone)]
@@ -108,6 +109,12 @@ pub(crate) struct SettingsWindow {
     app_detail_edit: Option<AppDetailEdit>,
     app_id_add_form: Option<AppIdAddForm>,
     app_id_edit_form: Option<AppIdEditForm>,
+    developer_device_add_form: Option<DeveloperDeviceAddForm>,
+    developer_devices: Vec<DeveloperDeviceOption>,
+    developer_devices_team_id: Option<String>,
+    developer_devices_loading: bool,
+    developer_devices_error: Option<SharedString>,
+    developer_devices_request_generation: u64,
     selected_entitlement: Option<usize>,
     entitlement_edit: Option<EntitlementEdit>,
     entitlement_type_picker_open: bool,
@@ -314,6 +321,13 @@ struct AppIdEditForm {
 }
 
 #[derive(Clone)]
+struct DeveloperDeviceAddForm {
+    team_id: String,
+    name: Entity<InputState>,
+    udid: Entity<InputState>,
+}
+
+#[derive(Clone)]
 struct AppIdCapabilityEdit {
     key: String,
     label: String,
@@ -460,6 +474,12 @@ fn settings_task_is_current(
     current_generation == task_generation && current_mode == expected_mode
 }
 
+fn developer_device_form_defaults(selected_device: Option<&DeviceOption>) -> (String, String) {
+    selected_device
+        .map(|device| (device.name.clone(), device.udid.clone()))
+        .unwrap_or_default()
+}
+
 impl SettingsSnapshot {
     fn from_state(mode: &SettingsMode, state: &SideloaderState) -> Option<Self> {
         match mode {
@@ -483,6 +503,7 @@ impl SettingsSnapshot {
                     selected_certificate: state.selected_certificate,
                     auto_app_id: state.auto_app_id,
                     selected_app_id: state.selected_app_id,
+                    selected_device: state.selected_device().cloned(),
                 }))
             }
             SettingsMode::AppSettings { app_index } => {
@@ -520,7 +541,13 @@ impl SettingsWindow {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-        cx.defer_in(window, |_, _, cx| cx.notify());
+        cx.defer_in(window, |settings, window, cx| {
+            if matches!(settings.mode, SettingsMode::Team) {
+                settings.load_developer_devices(window, cx);
+            } else {
+                cx.notify();
+            }
+        });
         cx.observe_window_appearance(window, |settings, window, cx| {
             sync_window_theme(window, cx, settings.theme_preference);
             cx.notify();
@@ -545,6 +572,12 @@ impl SettingsWindow {
             app_detail_edit: None,
             app_id_add_form: None,
             app_id_edit_form: None,
+            developer_device_add_form: None,
+            developer_devices: Vec::new(),
+            developer_devices_team_id: None,
+            developer_devices_loading: false,
+            developer_devices_error: None,
+            developer_devices_request_generation: 0,
             selected_entitlement: None,
             entitlement_edit: None,
             entitlement_type_picker_open: false,
@@ -858,6 +891,13 @@ impl SettingsWindow {
         self.app_detail_edit = None;
         self.app_id_add_form = None;
         self.app_id_edit_form = None;
+        self.developer_device_add_form = None;
+        self.developer_devices.clear();
+        self.developer_devices_team_id = None;
+        self.developer_devices_loading = false;
+        self.developer_devices_error = None;
+        self.developer_devices_request_generation =
+            self.developer_devices_request_generation.wrapping_add(1);
         self.selected_entitlement = None;
         self.entitlement_edit = None;
         self.entitlement_type_picker_open = false;
@@ -871,6 +911,9 @@ impl SettingsWindow {
         window.set_window_title(title);
         window.activate_window();
         window.focus(&self.focus_handle, cx);
+        if matches!(self.mode, SettingsMode::Team) {
+            self.load_developer_devices(window, cx);
+        }
         cx.defer_in(window, |_, _, cx| cx.notify());
         cx.notify();
     }
@@ -1058,7 +1101,7 @@ impl SettingsWindow {
         &mut self,
         index: usize,
         _: &ClickEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self.team_snapshot(cx) else {
@@ -1074,7 +1117,323 @@ impl SettingsWindow {
         self.app_id_picker_open = false;
         self.app_id_add_form = None;
         self.app_id_edit_form = None;
-        let _ = self.dispatch_parent_action(SettingsParentAction::SelectTeam(index), cx);
+        self.developer_device_add_form = None;
+        if self
+            .dispatch_parent_action(SettingsParentAction::SelectTeam(index), cx)
+            .is_ok()
+        {
+            self.load_developer_devices(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn current_developer_team_id(&self, cx: &mut Context<Self>) -> Option<String> {
+        let snapshot = self.team_snapshot(cx)?;
+        snapshot
+            .teams
+            .get(snapshot.selected_team)
+            .map(|team| team.identifier.clone())
+    }
+
+    fn accepts_developer_device_result(
+        &self,
+        task_generation: u64,
+        task_mode: &SettingsMode,
+        device_request_generation: u64,
+        team_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.accepts_task_result(task_generation, task_mode)
+            && self.developer_devices_request_generation == device_request_generation
+            && self.current_developer_team_id(cx).as_deref() == Some(team_id)
+    }
+
+    fn begin_developer_device_request(&mut self, team_id: &str) -> u64 {
+        self.developer_devices_request_generation =
+            self.developer_devices_request_generation.wrapping_add(1);
+        self.developer_devices_team_id = Some(team_id.to_string());
+        self.developer_devices_loading = true;
+        self.developer_devices_error = None;
+        self.developer_devices_request_generation
+    }
+
+    fn apply_developer_device_result(
+        &mut self,
+        result: Result<Vec<DeveloperDeviceOption>, AppError>,
+        team_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.developer_devices_loading = false;
+        self.developer_devices_team_id = Some(team_id);
+        match result {
+            Ok(devices) => self.developer_devices = devices,
+            Err(error) => self.developer_devices_error = Some(error.user_message().into()),
+        }
+        cx.notify();
+    }
+
+    fn load_developer_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.mode, SettingsMode::Team) {
+            return;
+        }
+        let Some(team_id) = self.current_developer_team_id(cx) else {
+            self.developer_devices_request_generation =
+                self.developer_devices_request_generation.wrapping_add(1);
+            self.developer_devices.clear();
+            self.developer_devices_team_id = None;
+            self.developer_devices_loading = false;
+            self.developer_devices_error = None;
+            cx.notify();
+            return;
+        };
+        if self.developer_devices_loading
+            && self.developer_devices_team_id.as_deref() == Some(team_id.as_str())
+        {
+            return;
+        }
+        if self.developer_devices_loading {
+            self.developer_devices_request_generation =
+                self.developer_devices_request_generation.wrapping_add(1);
+            self.developer_devices_loading = false;
+            self.developer_devices.clear();
+            self.developer_devices_team_id = Some(team_id.clone());
+        }
+        let developer_context = match self.selected_developer_context(cx) {
+            Ok(context) => context,
+            Err(error) => {
+                self.developer_devices_request_generation =
+                    self.developer_devices_request_generation.wrapping_add(1);
+                self.developer_devices.clear();
+                self.developer_devices_team_id = Some(team_id);
+                self.developer_devices_loading = false;
+                self.developer_devices_error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+
+        let task_generation = self.task_generation();
+        let task_mode = self.task_mode();
+        let device_request_generation = self.begin_developer_device_request(&team_id);
+        self.developer_devices.clear();
+        let team_id_for_operation = team_id.clone();
+        cx.spawn_in(window, async move |settings, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    app_effects::list_developer_devices(developer_context, team_id_for_operation)
+                        .await
+                })
+                .await;
+            let _ = settings.update_in(cx, |settings, _, cx| {
+                if !settings.accepts_developer_device_result(
+                    task_generation,
+                    &task_mode,
+                    device_request_generation,
+                    &team_id,
+                    cx,
+                ) {
+                    return;
+                }
+                settings.apply_developer_device_result(result, team_id, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn set_developer_device_add_popover(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        if self.developer_devices_loading || self.team_refreshing {
+            return;
+        }
+        if !open {
+            self.developer_device_add_form = None;
+            cx.notify();
+            return;
+        }
+        let selected_device = self
+            .team_snapshot(cx)
+            .and_then(|snapshot| snapshot.selected_device);
+        let Some(team_id) = self.current_developer_team_id(cx) else {
+            self.developer_devices_error = Some("No developer team is selected.".into());
+            cx.notify();
+            return;
+        };
+        let (default_name, default_udid) = developer_device_form_defaults(selected_device.as_ref());
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(default_name)
+                .placeholder("Development iPhone")
+                .clean_on_escape()
+        });
+        let udid = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(default_udid)
+                .placeholder("0000000000000000000000000000000000000000")
+                .clean_on_escape()
+        });
+        self.developer_device_add_form = Some(DeveloperDeviceAddForm {
+            team_id,
+            name: name.clone(),
+            udid,
+        });
+        self.developer_devices_error = None;
+        name.update(cx, |name, cx| name.focus(window, cx));
+        cx.notify();
+    }
+
+    fn cancel_developer_device_add(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        self.developer_device_add_form = None;
+        cx.notify();
+    }
+
+    fn submit_developer_device_add(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        if self.developer_devices_loading || self.team_refreshing {
+            return;
+        }
+        let Some(form) = self.developer_device_add_form.clone() else {
+            return;
+        };
+        if self.current_developer_team_id(cx).as_deref() != Some(form.team_id.as_str()) {
+            self.developer_device_add_form = None;
+            self.developer_devices_error =
+                Some("The selected developer team changed. Add the device again.".into());
+            cx.notify();
+            return;
+        }
+        let name = form.name.read(cx).value().trim().to_string();
+        let udid = form.udid.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            self.developer_devices_error = Some("Enter a device name.".into());
+            cx.notify();
+            return;
+        }
+        if udid.is_empty() {
+            self.developer_devices_error = Some("Enter a device UDID.".into());
+            cx.notify();
+            return;
+        }
+        let developer_context = match self.selected_developer_context(cx) {
+            Ok(context) => context,
+            Err(error) => {
+                self.developer_devices_error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+
+        let team_id = form.team_id;
+        let task_generation = self.task_generation();
+        let task_mode = self.task_mode();
+        let device_request_generation = self.begin_developer_device_request(&team_id);
+        self.developer_device_add_form = None;
+        let team_id_for_operation = team_id.clone();
+        cx.spawn_in(window, async move |settings, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    app_effects::add_developer_device(
+                        developer_context,
+                        team_id_for_operation,
+                        name,
+                        udid,
+                    )
+                    .await
+                })
+                .await;
+            let _ = settings.update_in(cx, |settings, _, cx| {
+                if !settings.accepts_developer_device_result(
+                    task_generation,
+                    &task_mode,
+                    device_request_generation,
+                    &team_id,
+                    cx,
+                ) {
+                    return;
+                }
+                settings.apply_developer_device_result(result, team_id, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn remove_developer_device(
+        &mut self,
+        device_id: String,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        if self.developer_devices_loading || self.team_refreshing {
+            return;
+        }
+        let Some(team_id) = self.current_developer_team_id(cx) else {
+            self.developer_devices_error = Some("No developer team is selected.".into());
+            cx.notify();
+            return;
+        };
+        if device_id.trim().is_empty() {
+            self.developer_devices_error =
+                Some("The selected device has no portal identifier.".into());
+            cx.notify();
+            return;
+        }
+        let developer_context = match self.selected_developer_context(cx) {
+            Ok(context) => context,
+            Err(error) => {
+                self.developer_devices_error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+
+        let task_generation = self.task_generation();
+        let task_mode = self.task_mode();
+        let device_request_generation = self.begin_developer_device_request(&team_id);
+        let team_id_for_operation = team_id.clone();
+        cx.spawn_in(window, async move |settings, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    app_effects::delete_developer_device(
+                        developer_context,
+                        team_id_for_operation,
+                        device_id,
+                    )
+                    .await
+                })
+                .await;
+            let _ = settings.update_in(cx, |settings, _, cx| {
+                if !settings.accepts_developer_device_result(
+                    task_generation,
+                    &task_mode,
+                    device_request_generation,
+                    &team_id,
+                    cx,
+                ) {
+                    return;
+                }
+                settings.apply_developer_device_result(result, team_id, cx);
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1238,6 +1597,11 @@ impl SettingsWindow {
         self.app_id_picker_open = false;
         self.app_id_add_form = None;
         self.app_id_edit_form = None;
+        self.developer_device_add_form = None;
+        self.developer_devices_request_generation =
+            self.developer_devices_request_generation.wrapping_add(1);
+        self.developer_devices_loading = false;
+        self.developer_devices_error = None;
         self.team_refreshing = true;
         self.team_refresh_error = None;
         self.certificate_error = None;
@@ -3062,6 +3426,7 @@ mod tests {
                 "16.0",
                 vec![SupportedDeviceFamily::IPhone],
             ),
+            nested_bundles: Vec::new(),
             path: format!("/tmp/{name}.ipa"),
             icon_path: None,
             icon_override_path: None,
@@ -3092,6 +3457,7 @@ mod tests {
                 serial_number: "SERIAL".to_string(),
                 machine_name: "Mac".to_string(),
                 private_key_available: true,
+                certificate_fingerprint: Some("certificate-fingerprint".to_string()),
                 public_key_fingerprint: Some("fingerprint".to_string()),
             }],
         }
@@ -3167,6 +3533,26 @@ mod tests {
     }
 
     #[test]
+    fn developer_device_form_uses_selected_device_defaults() {
+        let device = DeviceOption {
+            name: "Development iPhone".to_string(),
+            model: "iPhone".to_string(),
+            os: "18.0".to_string(),
+            udid: "00008110-001234567890001E".to_string(),
+            connection: "USB".to_string(),
+        };
+
+        assert_eq!(
+            developer_device_form_defaults(Some(&device)),
+            (device.name.clone(), device.udid.clone())
+        );
+        assert_eq!(
+            developer_device_form_defaults(None),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
     fn settings_snapshots_are_derived_from_latest_parent_state() {
         let mut state = sample_state();
 
@@ -3208,7 +3594,7 @@ impl Render for SettingsWindow {
         let theme_preference = self.theme_preference(cx);
         sync_window_theme(window, cx, theme_preference);
 
-        if self.adi_operation.is_some() || self.team_refreshing {
+        if self.adi_operation.is_some() || self.team_refreshing || self.developer_devices_loading {
             self.spinner_turns = (self.spinner_turns + 0.035) % 1.;
             window.request_animation_frame();
         } else {
@@ -3231,6 +3617,10 @@ impl Render for SettingsWindow {
         let app_settings_error = self.app_settings_error.clone();
         let app_id_add_form = self.app_id_add_form.clone();
         let app_id_edit_form = self.app_id_edit_form.clone();
+        let developer_device_add_form = self.developer_device_add_form.clone();
+        let developer_devices = self.developer_devices.clone();
+        let developer_devices_loading = self.developer_devices_loading;
+        let developer_devices_error = self.developer_devices_error.clone();
         let selected_entitlement = self.selected_entitlement;
         let entitlement_edit = self.entitlement_edit.clone();
         let entitlement_type_picker_open = self.entitlement_type_picker_open;
@@ -3257,6 +3647,10 @@ impl Render for SettingsWindow {
                     app_id_picker_open,
                     app_id_add_form: app_id_add_form.as_ref(),
                     app_id_edit_form: app_id_edit_form.as_ref(),
+                    developer_devices: &developer_devices,
+                    developer_devices_loading,
+                    developer_device_add_form: developer_device_add_form.as_ref(),
+                    developer_devices_error,
                     team_refreshing,
                     team_refresh_error,
                     certificate_error,

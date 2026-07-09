@@ -12,3 +12,18 @@ pub(crate) enum DeviceWatchEvent {
     Changed,
     Failed(String),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DeviceInstallProgress {
+    Connecting,
+    Uploading {
+        transferred_bytes: u64,
+        total_bytes: u64,
+        completed_files: usize,
+        total_files: usize,
+    },
+    Installing {
+        percent: u64,
+    },
+    Finalizing,
+}

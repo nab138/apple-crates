@@ -36,6 +36,8 @@ pub(crate) enum BackendError {
     Adi(String),
     #[error("Device discovery failed: {0}")]
     DeviceDiscovery(String),
+    #[error("Device installation failed: {0}")]
+    DeviceInstall(String),
     #[error("Cache operation failed: {0}")]
     Cache(String),
     #[error("Preferences operation failed: {0}")]
@@ -112,6 +114,7 @@ mod tests {
             BackendError::AppleAuth("invalid password".to_string()).user_message(),
             BackendError::Adi("not provisioned".to_string()).user_message(),
             BackendError::DeviceDiscovery("usbmuxd stopped".to_string()).user_message(),
+            BackendError::DeviceInstall("verification failed".to_string()).user_message(),
             BackendError::Cache("cache corrupt".to_string()).user_message(),
             BackendError::Preferences("settings corrupt".to_string()).user_message(),
             BackendError::Unsupported("not on this platform".to_string()).user_message(),

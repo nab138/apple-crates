@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[derive(Clone, Debug)]
 pub(crate) struct GeneratedCertificateSigningRequest {
     pub(crate) machine_id: String,
@@ -13,6 +16,11 @@ pub(crate) struct GeneratedCertificateSigningRequest {
     pub(crate) csr_content: String,
     pub(crate) public_key_fingerprint: String,
     pub(crate) private_key_pem: Vec<u8>,
+}
+
+pub(crate) struct AppManagedSigningMaterial {
+    pub(crate) private_key_pem: Vec<u8>,
+    pub(crate) certificate_der: Vec<u8>,
 }
 
 pub(crate) fn generate_development_certificate_signing_request(
@@ -124,29 +132,50 @@ pub(crate) fn app_managed_private_key_fingerprints() -> Vec<String> {
         .collect()
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn local_code_signing_identity_fingerprints() -> Vec<String> {
-    let output = match Command::new("security")
-        .args(["find-identity", "-v", "-p", "codesigning"])
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return Vec::new(),
-    };
-
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|part| {
-            let fingerprint = part.trim();
-            (fingerprint.len() == 40 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                .then(|| fingerprint.to_ascii_uppercase())
-        })
-        .collect()
+pub(crate) fn save_app_managed_certificate(
+    fingerprint: &str,
+    certificate_der: &[u8],
+) -> BackendResult<()> {
+    let certificates_dir = signing_certificates_dir()?;
+    fs::create_dir_all(&certificates_dir).map_err(|source| BackendError::Io {
+        action: "Create signing certificate folder",
+        path: certificates_dir.clone(),
+        source,
+    })?;
+    let certificate_path = certificates_dir.join(format!("{}.der", safe_fingerprint(fingerprint)?));
+    fs::write(&certificate_path, certificate_der).map_err(|source| BackendError::Io {
+        action: "Save signing certificate",
+        path: certificate_path,
+        source,
+    })
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn local_code_signing_identity_fingerprints() -> Vec<String> {
-    Vec::new()
+pub(crate) fn load_app_managed_signing_material(
+    certificate_fingerprint: &str,
+    public_key_fingerprint: &str,
+) -> BackendResult<AppManagedSigningMaterial> {
+    let certificate_path = signing_certificates_dir()?.join(format!(
+        "{}.der",
+        safe_fingerprint(certificate_fingerprint)?
+    ));
+    let certificate_der = read_signing_resource(
+        &certificate_path,
+        "Read signing certificate",
+        "The selected certificate data is not cached. Refresh Developer Settings, then try signing again.",
+    )?;
+
+    let private_key_path =
+        certificate_keys_dir()?.join(format!("{}.pem", safe_fingerprint(public_key_fingerprint)?));
+    let private_key_pem = read_signing_resource(
+        &private_key_path,
+        "Read certificate private key",
+        "The selected certificate has no Super Sideloader managed private key. Create a certificate or import its matching PEM key in Developer Settings.",
+    )?;
+
+    Ok(AppManagedSigningMaterial {
+        private_key_pem,
+        certificate_der,
+    })
 }
 
 fn public_key_der_from_private_key(key_path: &Path) -> BackendResult<Vec<u8>> {
@@ -205,17 +234,71 @@ pub(crate) fn save_app_managed_private_key(
         path: keys_dir.clone(),
         source,
     })?;
-    let key_path = keys_dir.join(format!("{fingerprint}.pem"));
+    let key_path = keys_dir.join(format!("{}.pem", safe_fingerprint(fingerprint)?));
     fs::write(&key_path, private_key_pem).map_err(|source| BackendError::Io {
         action: "Save certificate private key",
-        path: key_path,
+        path: key_path.clone(),
         source,
+    })?;
+    secure_private_key_file(&key_path)
+}
+
+#[cfg(unix)]
+fn secure_private_key_file(path: &Path) -> BackendResult<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+        BackendError::Io {
+            action: "Secure certificate private key",
+            path: path.to_path_buf(),
+            source,
+        }
     })
+}
+
+#[cfg(not(unix))]
+fn secure_private_key_file(_: &Path) -> BackendResult<()> {
+    Ok(())
+}
+
+fn read_signing_resource(
+    path: &Path,
+    action: &'static str,
+    missing_message: &str,
+) -> BackendResult<Vec<u8>> {
+    fs::read(path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            BackendError::Message(missing_message.to_string())
+        } else {
+            BackendError::Io {
+                action,
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })
+}
+
+fn safe_fingerprint(fingerprint: &str) -> BackendResult<String> {
+    let fingerprint = fingerprint.trim().to_ascii_uppercase();
+    if fingerprint.len() == 40 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(fingerprint)
+    } else {
+        Err(BackendError::Cache(
+            "Signing certificate cache contains an invalid fingerprint.".to_string(),
+        ))
+    }
 }
 
 fn certificate_keys_dir() -> BackendResult<PathBuf> {
     app_data_dir()
         .map(|path| path.join("certificates").join("keys"))
+        .ok_or_else(|| {
+            BackendError::Unsupported("The application data folder is not available.".to_string())
+        })
+}
+
+fn signing_certificates_dir() -> BackendResult<PathBuf> {
+    app_data_dir()
+        .map(|path| path.join("certificates").join("certificates"))
         .ok_or_else(|| {
             BackendError::Unsupported("The application data folder is not available.".to_string())
         })

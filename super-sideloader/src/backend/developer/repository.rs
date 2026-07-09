@@ -7,17 +7,17 @@ use crate::backend::developer::cache::{
 use crate::backend::developer::certificates::{
     app_managed_private_key_fingerprints, certificate_fingerprint,
     certificate_public_key_fingerprint, generate_development_certificate_signing_request,
-    import_app_managed_private_key, local_code_signing_identity_fingerprints,
-    save_app_managed_private_key, GeneratedCertificateSigningRequest,
+    import_app_managed_private_key, save_app_managed_certificate, save_app_managed_private_key,
+    GeneratedCertificateSigningRequest,
 };
 use crate::backend::developer::client::{with_developer_session, DeveloperSessionConfig};
 use crate::backend::developer::keychain::{
-    delete_keychain_session, load_keychain_session, save_keychain_session, token_is_near_expiry,
-    DeveloperAccountKeychainSession,
+    cache_keychain_session, delete_keychain_session, load_keychain_session, save_keychain_session,
+    token_is_near_expiry, DeveloperAccountKeychainSession,
 };
 use crate::backend::runtime as backend_runtime;
 use crate::backend::{BackendError, BackendResult};
-use crate::domain::{AdiBackendKind, DeveloperAccount, MachineIdentity};
+use crate::domain::{AdiBackendKind, DeveloperAccount, DeveloperDevice, MachineIdentity};
 use chrono::{DateTime, Local};
 use grandslam::http_session::AnisetteHTTPSession;
 use grandslam::{AuthOutcome, AuthenticatedHTTPSession, Token};
@@ -25,11 +25,11 @@ use plist::{Dictionary, Value};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 use xcode::{
-    AddAppIdAction, AppIdFeature, DeleteAppIdAction, DeveloperTeam,
-    DownloadTeamProvisioningProfileAction, IOSRequest, ListAllDevelopmentCertsAction,
-    ListAppIdsAction, ListTeamsAction, RevokeDevelopmentCertAction, SubmitDevelopmentCsrAction,
-    UpdateAppIdAction, ViewDeveloperAction, XcodeSession, XCODE_BUNDLE_INFORMATION,
-    XCODE_TOKEN_IDENTIFIER,
+    AddAppIdAction, AddDeviceAction, AppIdFeature, DeleteAppIdAction, DeleteDeviceAction,
+    DeveloperTeam, DownloadTeamProvisioningProfileAction, IOSRequest,
+    ListAllDevelopmentCertsAction, ListAppIdsAction, ListDevicesAction, ListTeamsAction,
+    RevokeDevelopmentCertAction, SubmitDevelopmentCsrAction, UpdateAppIdAction,
+    ViewDeveloperAction, XcodeSession, XCODE_BUNDLE_INFORMATION, XCODE_TOKEN_IDENTIFIER,
 };
 
 const HEARTBEAT_TOKEN_IDENTIFIER: &str = "com.apple.gs.idms.hb";
@@ -134,6 +134,39 @@ pub(crate) struct DeveloperProvisioningProfileDownloadRequest {
     pub(crate) email: String,
     pub(crate) team_id: String,
     pub(crate) app_id_id: String,
+    pub(crate) adi_backend: AdiBackendKind,
+    pub(crate) machine_identity: MachineIdentity,
+    pub(crate) android_adi_identifier: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeveloperDeviceListRequest {
+    pub(crate) account_id: String,
+    pub(crate) email: String,
+    pub(crate) team_id: String,
+    pub(crate) adi_backend: AdiBackendKind,
+    pub(crate) machine_identity: MachineIdentity,
+    pub(crate) android_adi_identifier: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeveloperDeviceAddRequest {
+    pub(crate) account_id: String,
+    pub(crate) email: String,
+    pub(crate) team_id: String,
+    pub(crate) name: String,
+    pub(crate) udid: String,
+    pub(crate) adi_backend: AdiBackendKind,
+    pub(crate) machine_identity: MachineIdentity,
+    pub(crate) android_adi_identifier: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeveloperDeviceDeleteRequest {
+    pub(crate) account_id: String,
+    pub(crate) email: String,
+    pub(crate) team_id: String,
+    pub(crate) device_id: String,
     pub(crate) adi_backend: AdiBackendKind,
     pub(crate) machine_identity: MachineIdentity,
     pub(crate) android_adi_identifier: String,
@@ -350,6 +383,70 @@ pub(crate) async fn download_developer_provisioning_profile(
     .await?
 }
 
+pub(crate) async fn list_developer_devices(
+    request: DeveloperDeviceListRequest,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    let account = refresh_account_seed(&request.account_id, &request.email);
+    let session = validated_keychain_session(&account)?;
+
+    backend_runtime::run("developer device list", move || async move {
+        let account_id = account.id.clone();
+        let result = with_developer_session(
+            session_config(
+                request.adi_backend,
+                request.machine_identity,
+                request.android_adi_identifier,
+            ),
+            session,
+            |xcode_session| {
+                Box::pin(
+                    async move { fetch_developer_devices(xcode_session, &request.team_id).await },
+                )
+            },
+        )
+        .await?;
+
+        save_keychain_session(&account_id, &result.keychain_session)?;
+        Ok(result.value)
+    })
+    .await?
+}
+
+pub(crate) async fn add_developer_device(
+    request: DeveloperDeviceAddRequest,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    mutate_developer_devices(
+        request.account_id,
+        request.email,
+        request.adi_backend,
+        request.machine_identity,
+        request.android_adi_identifier,
+        request.team_id,
+        DeveloperDeviceOperation::Add {
+            name: request.name,
+            udid: request.udid,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn delete_developer_device(
+    request: DeveloperDeviceDeleteRequest,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    mutate_developer_devices(
+        request.account_id,
+        request.email,
+        request.adi_backend,
+        request.machine_identity,
+        request.android_adi_identifier,
+        request.team_id,
+        DeveloperDeviceOperation::Delete {
+            device_id: request.device_id,
+        },
+    )
+    .await
+}
+
 pub(crate) async fn login_developer_account(
     request: DeveloperLoginRequest,
 ) -> BackendResult<DeveloperLoginOutcome> {
@@ -390,6 +487,11 @@ enum DeveloperTeamOperation {
     CreateCertificate {
         signing_request: GeneratedCertificateSigningRequest,
     },
+}
+
+enum DeveloperDeviceOperation {
+    Add { name: String, udid: String },
+    Delete { device_id: String },
 }
 
 async fn mutate_team_resources(
@@ -568,6 +670,129 @@ async fn perform_team_operation(
             Ok(Some(certificate_id))
         }
     }
+}
+
+async fn mutate_developer_devices(
+    account_id: String,
+    email: String,
+    adi_backend: AdiBackendKind,
+    machine_identity: MachineIdentity,
+    android_adi_identifier: String,
+    team_id: String,
+    operation: DeveloperDeviceOperation,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    let account = refresh_account_seed(&account_id, &email);
+    let session = validated_keychain_session(&account)?;
+
+    backend_runtime::run("developer device update", move || async move {
+        let account_id = account.id.clone();
+        let result = with_developer_session(
+            session_config(adi_backend, machine_identity, android_adi_identifier),
+            session,
+            |xcode_session| {
+                Box::pin(async move {
+                    perform_device_operation(xcode_session, &team_id, operation).await?;
+                    fetch_developer_devices(xcode_session, &team_id).await
+                })
+            },
+        )
+        .await?;
+
+        save_keychain_session(&account_id, &result.keychain_session)?;
+        Ok(result.value)
+    })
+    .await?
+}
+
+async fn perform_device_operation(
+    xcode_session: &XcodeSession<'_, '_>,
+    team_id: &str,
+    operation: DeveloperDeviceOperation,
+) -> BackendResult<()> {
+    match operation {
+        DeveloperDeviceOperation::Add { name, udid } => {
+            if name.trim().is_empty() {
+                return Err(BackendError::Message(
+                    "Enter a device name before registering it.".to_string(),
+                ));
+            }
+            if udid.trim().is_empty() {
+                return Err(BackendError::Message(
+                    "Enter a device UDID before registering it.".to_string(),
+                ));
+            }
+            xcode_session
+                .perform_developer_action(IOSRequest::new(AddDeviceAction {
+                    team_id: team_id.into(),
+                    name,
+                    device_number: udid,
+                }))
+                .await
+                .map_err(|error| {
+                    BackendError::Network(format!("Failed to register device: {error}"))
+                })?
+                .map_err(|error| {
+                    BackendError::AppleAuth(format!(
+                        "Failed to parse device registration response: {error}"
+                    ))
+                })?;
+        }
+        DeveloperDeviceOperation::Delete { device_id } => {
+            xcode_session
+                .perform_developer_action(IOSRequest::new(DeleteDeviceAction {
+                    team_id: team_id.into(),
+                    device_id,
+                }))
+                .await
+                .map_err(|error| {
+                    BackendError::Network(format!("Failed to remove device: {error}"))
+                })?
+                .map_err(|error| {
+                    BackendError::AppleAuth(format!(
+                        "Failed to parse device removal response: {error}"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_developer_devices(
+    xcode_session: &XcodeSession<'_, '_>,
+    team_id: &str,
+) -> BackendResult<Vec<DeveloperDevice>> {
+    let mut devices = xcode_session
+        .perform_developer_action(IOSRequest::new(ListDevicesAction {
+            team_id: team_id.into(),
+        }))
+        .await
+        .map_err(|error| {
+            BackendError::Network(format!("Failed to fetch registered devices: {error}"))
+        })?
+        .map_err(|error| {
+            BackendError::AppleAuth(format!(
+                "Failed to parse registered devices response: {error}"
+            ))
+        })?
+        .devices
+        .into_iter()
+        .map(|device| DeveloperDevice {
+            id: device.device_id,
+            name: device.name,
+            udid: device.device_number,
+        })
+        .collect::<Vec<_>>();
+    sort_developer_devices(&mut devices);
+    Ok(devices)
+}
+
+fn sort_developer_devices(devices: &mut [DeveloperDevice]) {
+    devices.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.udid.cmp(&right.udid))
+    });
 }
 
 async fn refresh_cached_team_only(
@@ -762,6 +987,8 @@ async fn login_developer_account_async(
             }
             return Err(error);
         }
+    } else {
+        cache_keychain_session(&account_cache.id, &keychain_session)?;
     }
 
     Ok(DeveloperLoginOutcome::SignedIn(account_cache.into()))
@@ -847,7 +1074,6 @@ async fn fetch_team_resources(
     team: CachedDeveloperTeam,
     xcode_session: &XcodeSession<'_, '_>,
 ) -> BackendResult<CachedDeveloperTeam> {
-    let local_identity_fingerprints = local_code_signing_identity_fingerprints();
     let app_managed_key_fingerprints = app_managed_private_key_fingerprints();
     let certificates = xcode_session
         .perform_developer_action(IOSRequest::new(ListAllDevelopmentCertsAction {
@@ -868,27 +1094,26 @@ async fn fetch_team_resources(
         })?
         .certificates
         .into_iter()
-        .map(|certificate| {
+        .map(|certificate| -> BackendResult<_> {
             let fingerprint = certificate_fingerprint(&certificate.cert_content);
             let public_key_fingerprint =
                 certificate_public_key_fingerprint(&certificate.cert_content);
-            CachedDevelopmentCertificate {
+            save_app_managed_certificate(&fingerprint, &certificate.cert_content)?;
+            Ok(CachedDevelopmentCertificate {
                 id: certificate.certificate_id,
                 name: certificate.name,
                 serial_number: certificate.serial_number,
                 machine_name: certificate.machine_name,
-                private_key_available: local_identity_fingerprints
-                    .iter()
-                    .any(|identity| identity == &fingerprint)
-                    || public_key_fingerprint.as_ref().is_some_and(|fingerprint| {
-                        app_managed_key_fingerprints
-                            .iter()
-                            .any(|candidate| candidate == fingerprint)
-                    }),
+                private_key_available: public_key_fingerprint.as_ref().is_some_and(|fingerprint| {
+                    app_managed_key_fingerprints
+                        .iter()
+                        .any(|candidate| candidate == fingerprint)
+                }),
+                certificate_fingerprint: Some(fingerprint),
                 public_key_fingerprint,
-            }
+            })
         })
-        .collect();
+        .collect::<BackendResult<Vec<_>>>()?;
 
     let app_id_response = xcode_session
         .perform_developer_action(IOSRequest::new(ListAppIdsAction {
@@ -1187,5 +1412,36 @@ mod tests {
 
         assert_eq!(seed.id, "TEAM");
         assert_eq!(seed.role, "Individual");
+    }
+
+    #[test]
+    fn developer_devices_are_sorted_by_name_then_udid() {
+        let mut devices = vec![
+            DeveloperDevice {
+                id: "3".into(),
+                name: "iPhone".into(),
+                udid: "B".into(),
+            },
+            DeveloperDevice {
+                id: "1".into(),
+                name: "iPad".into(),
+                udid: "Z".into(),
+            },
+            DeveloperDevice {
+                id: "2".into(),
+                name: "iphone".into(),
+                udid: "A".into(),
+            },
+        ];
+
+        sort_developer_devices(&mut devices);
+
+        assert_eq!(
+            devices
+                .into_iter()
+                .map(|device| device.id)
+                .collect::<Vec<_>>(),
+            vec!["1", "2", "3"]
+        );
     }
 }

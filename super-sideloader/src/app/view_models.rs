@@ -1,13 +1,14 @@
 use crate::app::models::{
     AccountOption, AdiBackendAvailability, AdiBackendDetail, AdiBackendKind, AdiBackendOption,
     AdiProvisioningState, AdiRepairAction, AppEntitlement, AppIdCapabilityOption, AppIdOption,
-    AppMetadata, AppOption, DevelopmentCertificateOption, DeviceOption, EntitlementValue,
-    EntitlementsSource, MachineIdentity, PatchOption, SupportedDeviceFamily, TeamOption,
+    AppMetadata, AppOption, DeveloperDeviceOption, DevelopmentCertificateOption, DeviceOption,
+    EntitlementValue, EntitlementsSource, MachineIdentity, NestedBundleOption, PatchOption,
+    SupportedDeviceFamily, TeamOption,
 };
 use crate::domain::{
     adi as domain_adi, device as domain_device, identity as domain_identity, ipa as domain_ipa,
     DeveloperAccount, DeveloperAppId, DeveloperAppIdCapability, DeveloperCertificate,
-    DeveloperTeam,
+    DeveloperDevice, DeveloperTeam,
 };
 
 pub(crate) fn account_option(account: DeveloperAccount) -> AccountOption {
@@ -93,6 +94,14 @@ pub(crate) fn app_option(app: domain_ipa::IpaApp) -> AppOption {
                 .map(supported_device_family)
                 .collect(),
         ),
+        nested_bundles: app
+            .nested_bundles
+            .into_iter()
+            .map(|bundle| NestedBundleOption {
+                name: bundle.name,
+                bundle_id: bundle.bundle_id,
+            })
+            .collect(),
         path: app.path,
         icon_path: app.icon_path,
         icon_override_path: None,
@@ -114,11 +123,53 @@ pub(crate) fn device_options(devices: Vec<domain_device::Device>) -> Vec<DeviceO
     devices.into_iter().map(device_option).collect()
 }
 
+pub(crate) fn developer_device_options(
+    devices: Vec<DeveloperDevice>,
+) -> Vec<DeveloperDeviceOption> {
+    devices
+        .into_iter()
+        .map(|device| DeveloperDeviceOption {
+            id: device.id,
+            name: device.name,
+            udid: device.udid,
+        })
+        .collect()
+}
+
 pub(crate) fn domain_patch(patch: PatchOption) -> domain_ipa::Patch {
     domain_ipa::Patch {
         name: patch.name,
         detail: patch.detail,
     }
+}
+
+pub(crate) fn domain_app_metadata(app: &AppOption) -> domain_ipa::AppMetadata {
+    domain_ipa::AppMetadata {
+        name: app.name().to_string(),
+        bundle_id: app.bundle_id().to_string(),
+        version: app.version().to_string(),
+        build: app.build().to_string(),
+        executable: app.metadata.executable.value().to_string(),
+        minimum_os: app.metadata.minimum_os.value().to_string(),
+        supported_devices: app
+            .supported_devices()
+            .iter()
+            .copied()
+            .map(domain_supported_device_family)
+            .collect(),
+    }
+}
+
+pub(crate) fn domain_app_entitlements(
+    entitlements: &[AppEntitlement],
+) -> Vec<domain_ipa::AppEntitlement> {
+    entitlements
+        .iter()
+        .map(|entitlement| domain_ipa::AppEntitlement {
+            key: entitlement.key.clone(),
+            value: domain_entitlement_value(&entitlement.value),
+        })
+        .collect()
 }
 
 fn team_option(team: DeveloperTeam) -> TeamOption {
@@ -171,6 +222,7 @@ fn certificate_option(certificate: DeveloperCertificate) -> DevelopmentCertifica
         serial_number: certificate.serial_number,
         machine_name: certificate.machine_name,
         private_key_available: certificate.private_key_available,
+        certificate_fingerprint: certificate.certificate_fingerprint,
         public_key_fingerprint: certificate.public_key_fingerprint,
     }
 }
@@ -230,6 +282,18 @@ fn supported_device_family(family: domain_ipa::SupportedDeviceFamily) -> Support
     }
 }
 
+fn domain_supported_device_family(
+    family: SupportedDeviceFamily,
+) -> domain_ipa::SupportedDeviceFamily {
+    match family {
+        SupportedDeviceFamily::IPhone => domain_ipa::SupportedDeviceFamily::IPhone,
+        SupportedDeviceFamily::IPad => domain_ipa::SupportedDeviceFamily::IPad,
+        SupportedDeviceFamily::AppleTv => domain_ipa::SupportedDeviceFamily::AppleTv,
+        SupportedDeviceFamily::AppleWatch => domain_ipa::SupportedDeviceFamily::AppleWatch,
+        SupportedDeviceFamily::Mac => domain_ipa::SupportedDeviceFamily::Mac,
+    }
+}
+
 fn app_entitlement(entitlement: domain_ipa::AppEntitlement) -> AppEntitlement {
     AppEntitlement {
         key: entitlement.key,
@@ -256,6 +320,28 @@ fn entitlement_value(value: domain_ipa::EntitlementValue) -> EntitlementValue {
         domain_ipa::EntitlementValue::Date(value) => EntitlementValue::Date(value),
         domain_ipa::EntitlementValue::Uid(value) => EntitlementValue::Uid(value),
         domain_ipa::EntitlementValue::Unknown(value) => EntitlementValue::Unknown(value),
+    }
+}
+
+fn domain_entitlement_value(value: &EntitlementValue) -> domain_ipa::EntitlementValue {
+    match value {
+        EntitlementValue::String(value) => domain_ipa::EntitlementValue::String(value.clone()),
+        EntitlementValue::Boolean(value) => domain_ipa::EntitlementValue::Boolean(*value),
+        EntitlementValue::Integer(value) => domain_ipa::EntitlementValue::Integer(*value),
+        EntitlementValue::Number(value) => domain_ipa::EntitlementValue::Number(*value),
+        EntitlementValue::Array(values) => domain_ipa::EntitlementValue::Array(
+            values.iter().map(domain_entitlement_value).collect(),
+        ),
+        EntitlementValue::Dictionary(values) => domain_ipa::EntitlementValue::Dictionary(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), domain_entitlement_value(value)))
+                .collect(),
+        ),
+        EntitlementValue::Data(value) => domain_ipa::EntitlementValue::Data(value.clone()),
+        EntitlementValue::Date(value) => domain_ipa::EntitlementValue::Date(value.clone()),
+        EntitlementValue::Uid(value) => domain_ipa::EntitlementValue::Uid(*value),
+        EntitlementValue::Unknown(value) => domain_ipa::EntitlementValue::Unknown(value.clone()),
     }
 }
 
@@ -313,6 +399,7 @@ mod tests {
                     serial_number: "SERIAL".to_string(),
                     machine_name: "Mac".to_string(),
                     private_key_available: true,
+                    certificate_fingerprint: Some("certificate-fingerprint".to_string()),
                     public_key_fingerprint: Some("fingerprint".to_string()),
                 }],
             }],
@@ -378,6 +465,19 @@ mod tests {
     }
 
     #[test]
+    fn developer_device_maps_to_settings_option() {
+        let options = developer_device_options(vec![DeveloperDevice {
+            id: "portal-device-id".to_string(),
+            name: "Development iPhone".to_string(),
+            udid: "0000000000000000000000000000000000000000".to_string(),
+        }]);
+
+        assert_eq!(options[0].id, "portal-device-id");
+        assert_eq!(options[0].name, "Development iPhone");
+        assert_eq!(options[0].udid.len(), 40);
+    }
+
+    #[test]
     fn ipa_app_maps_to_ui_app_option_at_app_boundary() {
         let option = app_option(domain_ipa::IpaApp {
             metadata: domain_ipa::AppMetadata {
@@ -392,6 +492,10 @@ mod tests {
                     domain_ipa::SupportedDeviceFamily::IPad,
                 ],
             },
+            nested_bundles: vec![domain_ipa::NestedBundle {
+                name: "Widget".to_string(),
+                bundle_id: "com.example.app.Widget".to_string(),
+            }],
             path: "/tmp/Example.ipa".to_string(),
             icon_path: Some("/tmp/icon.png".to_string()),
             entitlements: vec![domain_ipa::AppEntitlement {
@@ -407,6 +511,7 @@ mod tests {
 
         assert_eq!(option.name(), "Example");
         assert_eq!(option.bundle_id(), "com.example.app");
+        assert_eq!(option.nested_bundles[0].bundle_id, "com.example.app.Widget");
         assert_eq!(
             option.supported_devices(),
             &[SupportedDeviceFamily::IPhone, SupportedDeviceFamily::IPad]

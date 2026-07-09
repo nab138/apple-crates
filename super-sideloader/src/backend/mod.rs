@@ -2,6 +2,7 @@ pub(crate) mod adi;
 pub(crate) mod adi_service;
 pub(crate) mod device;
 pub(crate) mod error;
+mod icon;
 pub(crate) mod ipa;
 pub(crate) mod paths;
 pub(crate) mod preferences;

@@ -1,126 +1,216 @@
-use futures::future::join_all;
-use futures::{FutureExt, future::BoxFuture};
-use log::warn;
-use plist::{Dictionary, Value};
-use sha1::Digest as _;
-use sha2::Digest as _;
+use apple_codesign::{
+    BundleSigningSettings, CodeSignError, ProvisioningProfile, Result, RustCryptoCmsSigner,
+    sign_bundle,
+};
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio::task::{block_in_place, spawn_blocking};
 
-struct Bundle {
-    path: PathBuf,
+fn main() -> Result<()> {
+    let Some(args) = CliArgs::parse()? else {
+        print_usage();
+        return Ok(());
+    };
+
+    let mobileprovision = read_file(&args.mobileprovision)?;
+    let profile = ProvisioningProfile::parse(&mobileprovision)?;
+    let private_key = read_der_or_pem(&args.private_key, &["PRIVATE KEY", "RSA PRIVATE KEY"])?;
+    let certificate = read_der_or_pem(&args.certificate, &["CERTIFICATE"])?;
+    let mut certificate_chain =
+        Vec::with_capacity(args.certificate_chain.len() + profile.certificate_chain_der().len());
+
+    for certificate in &args.certificate_chain {
+        certificate_chain.push(read_der_or_pem(certificate, &["CERTIFICATE"])?);
+    }
+    certificate_chain.extend(profile.certificate_chain_der().iter().cloned());
+
+    let signer = RustCryptoCmsSigner::from_der(
+        &private_key,
+        &certificate,
+        certificate_chain.iter().map(Vec::as_slice),
+    )?;
+
+    let team_id = args
+        .team_id
+        .as_deref()
+        .unwrap_or_else(|| profile.team_id())
+        .to_string();
+    let mut settings =
+        BundleSigningSettings::new(team_id, profile.entitlements().clone(), Some(&signer));
+    settings.embedded_mobileprovision = Some(&mobileprovision);
+    let nested_profiles = args
+        .profiles_by_bundle_id
+        .iter()
+        .map(|(bundle_id, path)| {
+            let data = read_file(path)?;
+            let profile = ProvisioningProfile::parse(&data)?;
+            let entitlements = profile.entitlements().clone();
+            Ok((bundle_id.clone(), data, entitlements))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    settings.embedded_mobileprovisions_by_bundle_id = nested_profiles
+        .iter()
+        .map(|(bundle_id, data, _)| (bundle_id.clone(), data.as_slice()))
+        .collect::<BTreeMap<_, _>>();
+    settings.entitlements_by_bundle_id = nested_profiles
+        .iter()
+        .map(|(bundle_id, _, entitlements)| (bundle_id.clone(), entitlements.clone()))
+        .collect();
+    if let Some(reservation) = args.cms_blob_reservation {
+        settings.cms_blob_reservation = reservation;
+    }
+
+    sign_bundle(args.bundle, &settings)
 }
 
-impl Bundle {
-    async fn code_resources(&self) -> Dictionary {
-        struct CodeResourceFile {
-            path: PathBuf,
-            sha1: Vec<u8>,
-            sha256: Vec<u8>,
+#[derive(Debug)]
+struct CliArgs {
+    bundle: PathBuf,
+    certificate: PathBuf,
+    private_key: PathBuf,
+    mobileprovision: PathBuf,
+    certificate_chain: Vec<PathBuf>,
+    profiles_by_bundle_id: Vec<(String, PathBuf)>,
+    team_id: Option<String>,
+    cms_blob_reservation: Option<usize>,
+}
+
+impl CliArgs {
+    fn parse() -> Result<Option<Self>> {
+        let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        if raw_args.is_empty() || raw_args.iter().any(|arg| arg == "-h" || arg == "--help") {
+            return Ok(None);
         }
 
-        async fn hash_file(relative_path: PathBuf, path: PathBuf) -> CodeResourceFile {
-            let file_data = fs::read(&path).unwrap(); // FIXME unwrap
-            let file_data2 = file_data.clone();
-            let sha1 = spawn_blocking(move || sha1::Sha1::digest(&file_data)[..].into());
-            let sha256 = spawn_blocking(move || sha2::Sha256::digest(&file_data2)[..].into());
-            CodeResourceFile {
-                path: relative_path,
-                sha1: sha1.await.unwrap(),
-                sha256: sha256.await.unwrap(),
-            }
-        }
+        let mut bundle = None;
+        let mut certificate = None;
+        let mut private_key = None;
+        let mut mobileprovision = None;
+        let mut certificate_chain = Vec::new();
+        let mut profiles_by_bundle_id = Vec::new();
+        let mut team_id = None;
+        let mut cms_blob_reservation = None;
 
-        fn resources_for_directory(
-            root: &Path,
-            directory: PathBuf,
-        ) -> Vec<BoxFuture<'static, CodeResourceFile>> {
-            let mut output = Vec::new();
-            let mut subfolders = Vec::new();
-            if let Ok(read_dir) = fs::read_dir(directory) {
-                for entry in read_dir {
-                    if let Ok(entry) = entry {
-                        let metadata = entry.metadata().expect("metadata call failed");
-                        let path = entry.path();
-                        if metadata.is_file() {
-                            if let Ok(relative_path) = entry.path().strip_prefix(root) {
-                                // TODO check rules
-                                output.push(hash_file(relative_path.to_path_buf(), path).boxed());
-                            } else {
-                                warn!("Skipping {:?} as its prefix is not correct", entry.path());
-                            }
-                        } else if metadata.is_dir() {
-                            subfolders.push(resources_for_directory(root, path));
-                        }
-                    }
+        let mut args = raw_args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.to_string_lossy().as_ref() {
+                "--bundle" | "-b" => set_path_arg(&mut bundle, "--bundle", args.next())?,
+                "--certificate" | "--cert" | "-c" => {
+                    set_path_arg(&mut certificate, "--certificate", args.next())?
+                }
+                "--private-key" | "--key" | "-k" => {
+                    set_path_arg(&mut private_key, "--private-key", args.next())?
+                }
+                "--mobileprovision" | "--profile" | "-m" => {
+                    set_path_arg(&mut mobileprovision, "--mobileprovision", args.next())?
+                }
+                "--chain" => certificate_chain.push(next_path_arg("--chain", args.next())?),
+                "--profile-for" => profiles_by_bundle_id.push(next_profile_arg(args.next())?),
+                "--team-id" => {
+                    team_id = Some(next_string_arg("--team-id", args.next())?);
+                }
+                "--cms-reservation" => {
+                    let value = next_string_arg("--cms-reservation", args.next())?;
+                    cms_blob_reservation = Some(value.parse().map_err(|_| {
+                        CodeSignError::Argument(format!(
+                            "--cms-reservation must be a byte count, got {value}"
+                        ))
+                    })?);
+                }
+                value if value.starts_with('-') => {
+                    return Err(CodeSignError::Argument(format!("unknown argument {value}")));
+                }
+                _ if bundle.is_none() => {
+                    bundle = Some(PathBuf::from(arg));
+                }
+                value => {
+                    return Err(CodeSignError::Argument(format!(
+                        "unexpected positional argument {value}"
+                    )));
                 }
             }
-
-            for subfolder in subfolders {
-                let data = subfolder;
-                output.extend(data);
-            }
-            output
         }
 
-        let path_buf = self.path.to_path_buf();
-        let resources = resources_for_directory(&self.path, path_buf);
-
-        let rules = Dictionary::new();
-        let rules2 = Dictionary::new();
-
-        let (files, files2) = {
-            let mut files = Dictionary::new();
-            let mut files2 = Dictionary::new();
-
-            for res in resources {
-                let CodeResourceFile { path, sha1, sha256 } = res.await;
-
-                let path = path.to_string_lossy().into_owned();
-
-                let sha1: Vec<u8> = sha1.into();
-                let sha256: Vec<u8> = sha256.into();
-
-                files.insert(path.clone(), Value::Data(sha1.clone()));
-
-                let mut file2 = Dictionary::new();
-                file2.insert("hash".to_string(), Value::Data(sha1));
-                file2.insert("hash2".to_string(), Value::Data(sha256));
-
-                files2.insert(path, Value::Dictionary(file2));
-            }
-
-            (files, files2)
-        };
-
-        let code_resources = {
-            let mut code_resources = Dictionary::new();
-            code_resources.insert("files".to_string(), Value::Dictionary(files));
-            code_resources.insert("files2".to_string(), Value::Dictionary(files2));
-            code_resources.insert("rules".to_string(), Value::Dictionary(rules));
-            code_resources.insert("rules2".to_string(), Value::Dictionary(rules2));
-
-            code_resources
-        };
-
-        code_resources
-    }
-
-    async fn sign(&self) {
-        let code_resources = self.code_resources().await;
-
-        let mut data = Vec::<u8>::new();
-        plist::to_writer_xml(&mut data, &code_resources).expect("TODO: panic message");
-        println!("{}", String::from_utf8(data).unwrap());
+        Ok(Some(Self {
+            bundle: required_path(bundle, "--bundle")?,
+            certificate: required_path(certificate, "--certificate")?,
+            private_key: required_path(private_key, "--private-key")?,
+            mobileprovision: required_path(mobileprovision, "--mobileprovision")?,
+            certificate_chain,
+            profiles_by_bundle_id,
+            team_id,
+            cms_blob_reservation,
+        }))
     }
 }
 
-#[tokio::main]
-async fn main() {
-    Bundle {
-        path: "/home/dadoum/Téléchargements/YouTube.app/".into(),
+fn next_profile_arg(value: Option<OsString>) -> Result<(String, PathBuf)> {
+    let value = next_string_arg("--profile-for", value)?;
+    let (bundle_id, path) = value.split_once('=').ok_or_else(|| {
+        CodeSignError::Argument("--profile-for requires BUNDLE_IDENTIFIER=PROFILE_PATH".to_string())
+    })?;
+    if bundle_id.trim().is_empty() || path.trim().is_empty() {
+        return Err(CodeSignError::Argument(
+            "--profile-for requires non-empty bundle identifier and path".to_string(),
+        ));
     }
-    .sign()
-    .await;
+    Ok((bundle_id.to_string(), PathBuf::from(path)))
+}
+
+fn set_path_arg(slot: &mut Option<PathBuf>, name: &str, value: Option<OsString>) -> Result<()> {
+    if slot.is_some() {
+        return Err(CodeSignError::Argument(format!(
+            "{name} was provided twice"
+        )));
+    }
+    *slot = Some(next_path_arg(name, value)?);
+    Ok(())
+}
+
+fn next_path_arg(name: &str, value: Option<OsString>) -> Result<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .ok_or_else(|| CodeSignError::Argument(format!("{name} requires a value")))
+}
+
+fn next_string_arg(name: &str, value: Option<OsString>) -> Result<String> {
+    let value = value.ok_or_else(|| CodeSignError::Argument(format!("{name} requires a value")))?;
+    value
+        .into_string()
+        .map_err(|_| CodeSignError::Argument(format!("{name} must be valid UTF-8")))
+}
+
+fn required_path(value: Option<PathBuf>, name: &str) -> Result<PathBuf> {
+    value.ok_or_else(|| CodeSignError::Argument(format!("missing required {name}")))
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(|source| CodeSignError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn read_der_or_pem(path: &Path, allowed_labels: &[&str]) -> Result<Vec<u8>> {
+    let data = read_file(path)?;
+    if !data.starts_with(b"-----BEGIN ") {
+        return Ok(data);
+    }
+
+    let (label, der) = pem_rfc7468::decode_vec(&data)
+        .map_err(|err| CodeSignError::Argument(format!("failed to decode PEM {path:?}: {err}")))?;
+    if allowed_labels.contains(&label) {
+        Ok(der)
+    } else {
+        Err(CodeSignError::Argument(format!(
+            "unsupported PEM label {label:?} in {path:?}; expected one of {allowed_labels:?}"
+        )))
+    }
+}
+
+fn print_usage() {
+    eprintln!(
+        "usage: apple-codesign --bundle Bundle.app --certificate signer.cer --private-key signer.key --mobileprovision profile.mobileprovision [--profile-for BUNDLE_IDENTIFIER=PROFILE_PATH ...] [--chain wwdr.cer ...] [--team-id TEAMID] [--cms-reservation BYTES]"
+    );
 }
