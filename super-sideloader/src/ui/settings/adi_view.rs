@@ -682,13 +682,19 @@ fn android_coreadi_apk_link(disabled: bool, cx: &mut Context<SettingsWindow>) ->
                 .when(disabled, |this| this.opacity(0.45).tab_stop(false))
                 .when(!disabled, |this| {
                     this.cursor_pointer()
-                        .hover(|style| style.text_color(rgb(0x173f45)))
                         .on_click(cx.listener(SettingsWindow::select_coreadi_apk))
                 })
                 .child(
                     div()
+                        .size_full()
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x0f6f7a))
+                        .when(!disabled, |this| {
+                            this.hover(|style| style.text_color(rgb(0x173f45)))
+                        })
+                        .flex()
+                        .items_center()
                         .child("Select APK from the disk..."),
                 ),
         )
