@@ -437,6 +437,7 @@ pub(crate) enum EntitlementsSource {
 pub(crate) struct AppOption {
     pub(crate) metadata: AppMetadata,
     pub(crate) nested_bundles: Vec<NestedBundleOption>,
+    pub(crate) strip_extensions: bool,
     pub(crate) path: String,
     pub(crate) icon_path: Option<String>,
     pub(crate) icon_override_path: Option<String>,
@@ -450,6 +451,13 @@ pub(crate) struct AppOption {
 pub(crate) struct NestedBundleOption {
     pub(crate) name: String,
     pub(crate) bundle_id: String,
+    pub(crate) kind: NestedBundleKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NestedBundleKind {
+    App,
+    AppExtension,
 }
 
 impl AppOption {
@@ -471,6 +479,19 @@ impl AppOption {
 
     pub(crate) fn build(&self) -> &String {
         self.metadata.build.value()
+    }
+
+    pub(crate) fn app_extension_count(&self) -> usize {
+        self.nested_bundles
+            .iter()
+            .filter(|bundle| bundle.kind == NestedBundleKind::AppExtension)
+            .count()
+    }
+
+    pub(crate) fn nested_bundles_for_signing(&self) -> impl Iterator<Item = &NestedBundleOption> {
+        self.nested_bundles.iter().filter(|bundle| {
+            !self.strip_extensions || bundle.kind != NestedBundleKind::AppExtension
+        })
     }
 
     pub(crate) fn field(&self, field: AppMetadataField) -> &AppFieldValue {

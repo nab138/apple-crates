@@ -2,8 +2,8 @@ use crate::app::models::{
     AccountOption, AdiBackendAvailability, AdiBackendDetail, AdiBackendKind, AdiBackendOption,
     AdiProvisioningState, AdiRepairAction, AppEntitlement, AppIdCapabilityOption, AppIdOption,
     AppMetadata, AppOption, DeveloperDeviceOption, DevelopmentCertificateOption, DeviceOption,
-    EntitlementValue, EntitlementsSource, MachineIdentity, NestedBundleOption, PatchOption,
-    SupportedDeviceFamily, TeamOption,
+    EntitlementValue, EntitlementsSource, MachineIdentity, NestedBundleKind, NestedBundleOption,
+    PatchOption, SupportedDeviceFamily, TeamOption,
 };
 use crate::domain::{
     adi as domain_adi, device as domain_device, identity as domain_identity, ipa as domain_ipa,
@@ -100,8 +100,13 @@ pub(crate) fn app_option(app: domain_ipa::IpaApp) -> AppOption {
             .map(|bundle| NestedBundleOption {
                 name: bundle.name,
                 bundle_id: bundle.bundle_id,
+                kind: match bundle.kind {
+                    domain_ipa::NestedBundleKind::App => NestedBundleKind::App,
+                    domain_ipa::NestedBundleKind::AppExtension => NestedBundleKind::AppExtension,
+                },
             })
             .collect(),
+        strip_extensions: false,
         path: app.path,
         icon_path: app.icon_path,
         icon_override_path: None,
@@ -495,6 +500,7 @@ mod tests {
             nested_bundles: vec![domain_ipa::NestedBundle {
                 name: "Widget".to_string(),
                 bundle_id: "com.example.app.Widget".to_string(),
+                kind: domain_ipa::NestedBundleKind::AppExtension,
             }],
             path: "/tmp/Example.ipa".to_string(),
             icon_path: Some("/tmp/icon.png".to_string()),
@@ -512,6 +518,10 @@ mod tests {
         assert_eq!(option.name(), "Example");
         assert_eq!(option.bundle_id(), "com.example.app");
         assert_eq!(option.nested_bundles[0].bundle_id, "com.example.app.Widget");
+        assert_eq!(
+            option.nested_bundles[0].kind,
+            NestedBundleKind::AppExtension
+        );
         assert_eq!(
             option.supported_devices(),
             &[SupportedDeviceFamily::IPhone, SupportedDeviceFamily::IPad]

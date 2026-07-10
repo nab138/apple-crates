@@ -461,7 +461,7 @@ pub(crate) async fn sign_ipa(
     )]);
     let mut profile_requests = vec![(effective_bundle_id.clone(), app_id.developer_id)];
 
-    for (nested_bundle, target) in request.app.nested_bundles.iter().zip(targets.nested) {
+    for (nested_bundle, target) in request.app.nested_bundles_for_signing().zip(targets.nested) {
         let (nested_app_id, account_update) = resolve_signing_app_id(
             request.developer_context.clone(),
             &request.team_id,
@@ -521,6 +521,7 @@ pub(crate) async fn sign_ipa(
             metadata,
             bundle_id_replacements,
             icon_override_path: request.app.icon_override_path.as_deref().map(PathBuf::from),
+            strip_extensions: request.app.strip_extensions,
             team_id: request.team_id,
             provisioning_profiles,
             private_key_pem: signing_material.private_key_pem,
@@ -690,8 +691,7 @@ fn nested_app_id_targets(
     app: &AppOption,
     root_bundle_identifier: &str,
 ) -> Vec<SigningAppIdTarget> {
-    app.nested_bundles
-        .iter()
+    app.nested_bundles_for_signing()
         .map(|nested_bundle| {
             let desired_identifier = rebased_nested_bundle_identifier(
                 app.original_bundle_id(),
@@ -1037,7 +1037,8 @@ pub(crate) async fn download_provisioning_profile(
 mod tests {
     use super::*;
     use crate::app::models::{
-        AppMetadata, EntitlementsSource, NestedBundleOption, SupportedDeviceFamily,
+        AppMetadata, EntitlementsSource, NestedBundleKind, NestedBundleOption,
+        SupportedDeviceFamily,
     };
 
     fn app_id(identifier: &str) -> AppIdOption {
@@ -1066,8 +1067,10 @@ mod tests {
                 .map(|bundle_id| NestedBundleOption {
                     name: bundle_id.rsplit('.').next().unwrap().to_string(),
                     bundle_id: (*bundle_id).to_string(),
+                    kind: NestedBundleKind::AppExtension,
                 })
                 .collect(),
+            strip_extensions: false,
             path: "/tmp/Example.ipa".to_string(),
             icon_path: None,
             icon_override_path: None,
@@ -1184,6 +1187,26 @@ mod tests {
         );
         assert_eq!(plan.available_quantity, Some(5));
         assert_eq!(plan.remaining_after_signing(), Some(3));
+    }
+
+    #[test]
+    fn provisioning_plan_omits_stripped_extensions_but_keeps_nested_apps() {
+        let mut app = app(
+            "com.example.app",
+            &["com.example.app.widget", "com.example.app.watch"],
+        );
+        app.nested_bundles[1].kind = NestedBundleKind::App;
+        app.strip_extensions = true;
+
+        let plan = app_id_provisioning_plan(&team(Vec::new(), Some(5)), true, None, &app).unwrap();
+
+        assert_eq!(
+            plan.app_ids
+                .iter()
+                .map(|app_id| app_id.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["com.example.app.TEAM", "com.example.app.TEAM.watch"]
+        );
     }
 
     #[test]

@@ -89,6 +89,8 @@ pub(crate) struct AppOverridePreferences {
     pub(crate) supported_devices: Option<String>,
     pub(crate) icon_path: Option<String>,
     pub(crate) entitlements: Option<Vec<EntitlementPreferences>>,
+    #[serde(default)]
+    pub(crate) strip_extensions: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -255,6 +257,7 @@ impl From<&AppOption> for AppOverridePreferences {
                     .map(EntitlementPreferences::from)
                     .collect()
             }),
+            strip_extensions: app.strip_extensions,
         }
     }
 }
@@ -277,6 +280,7 @@ pub(crate) fn apply_app_overrides(app: &mut AppOption, overrides: &AppOverridePr
             .map(AppEntitlement::from)
             .collect::<Vec<_>>()
     });
+    app.strip_extensions = overrides.strip_extensions && app.app_extension_count() > 0;
 }
 
 pub(crate) fn load_preferences() -> AppResult<SideloaderPreferences> {
@@ -299,7 +303,9 @@ pub(crate) fn save_preferences(preferences: &SideloaderPreferences) -> AppResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::models::{AppMetadata, EntitlementsSource, PatchOption};
+    use crate::app::models::{
+        AppMetadata, EntitlementsSource, NestedBundleKind, NestedBundleOption, PatchOption,
+    };
 
     fn sample_app() -> AppOption {
         AppOption {
@@ -312,7 +318,12 @@ mod tests {
                 "16.0",
                 vec![SupportedDeviceFamily::IPhone],
             ),
-            nested_bundles: Vec::new(),
+            nested_bundles: vec![NestedBundleOption {
+                name: "Widget".to_string(),
+                bundle_id: "com.example.original.widget".to_string(),
+                kind: NestedBundleKind::AppExtension,
+            }],
+            strip_extensions: false,
             path: "/tmp/App.ipa".to_string(),
             icon_path: None,
             icon_override_path: None,
@@ -346,6 +357,7 @@ mod tests {
                     value: "true".to_string(),
                     values: None,
                 }]),
+                strip_extensions: true,
             },
         );
 
@@ -360,6 +372,8 @@ mod tests {
             &[SupportedDeviceFamily::IPhone, SupportedDeviceFamily::IPad]
         );
         assert_eq!(app.icon_override_path.as_deref(), Some("/tmp/icon.png"));
+        assert!(app.strip_extensions);
+        assert!(AppOverridePreferences::from(&app).strip_extensions);
         assert_eq!(
             app.entitlement_overrides,
             Some(vec![AppEntitlement {
@@ -367,5 +381,12 @@ mod tests {
                 value: EntitlementValue::Boolean(true),
             }])
         );
+    }
+
+    #[test]
+    fn older_app_overrides_default_to_preserving_extensions() {
+        let overrides = toml::from_str::<AppOverridePreferences>("").unwrap();
+
+        assert!(!overrides.strip_extensions);
     }
 }

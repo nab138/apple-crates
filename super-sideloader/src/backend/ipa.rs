@@ -5,8 +5,8 @@ use crate::backend::icon::{
 use crate::backend::paths::app_data_dir;
 use crate::backend::{runtime as backend_runtime, BackendError, BackendResult};
 use crate::domain::{
-    AppEntitlement, AppMetadata, EntitlementValue, EntitlementsSource, IpaApp, NestedBundle, Patch,
-    SupportedDeviceFamily,
+    AppEntitlement, AppMetadata, EntitlementValue, EntitlementsSource, IpaApp, NestedBundle,
+    NestedBundleKind, Patch, SupportedDeviceFamily,
 };
 use apple_codesign::{
     sign_bundle, BundleSigningSettings, ProvisioningProfile, RustCryptoCmsSigner,
@@ -42,6 +42,7 @@ pub(crate) struct IpaSigningRequest {
     pub(crate) metadata: AppMetadata,
     pub(crate) bundle_id_replacements: BTreeMap<String, String>,
     pub(crate) icon_override_path: Option<PathBuf>,
+    pub(crate) strip_extensions: bool,
     pub(crate) team_id: String,
     pub(crate) provisioning_profiles: BTreeMap<String, Vec<u8>>,
     pub(crate) private_key_pem: Vec<u8>,
@@ -162,12 +163,13 @@ async fn read_nested_signable_bundles(
         .enumerate()
         .filter_map(|(index, entry)| {
             let path = entry_name(entry)?;
-            is_nested_signable_info_plist(path, app_prefix).then(|| (index, path.to_string()))
+            nested_signable_bundle_kind(path, app_prefix)
+                .map(|kind| (index, path.to_string(), kind))
         })
         .collect::<Vec<_>>();
     let mut bundles = Vec::with_capacity(candidates.len());
 
-    for (index, path) in candidates {
+    for (index, path, kind) in candidates {
         let bytes = read_entry(reader, index, &path).await?;
         let info = plist::from_bytes::<Dictionary>(&bytes)
             .map_err(|error| BackendError::Plist(format!("{path}: {error}")))?;
@@ -179,7 +181,11 @@ async fn read_nested_signable_bundles(
             .or_else(|| plist_string(&info, "CFBundleName"))
             .unwrap_or(&bundle_id)
             .to_string();
-        bundles.push(NestedBundle { name, bundle_id });
+        bundles.push(NestedBundle {
+            name,
+            bundle_id,
+            kind,
+        });
     }
 
     bundles.sort_by(|left, right| left.bundle_id.cmp(&right.bundle_id));
@@ -187,18 +193,23 @@ async fn read_nested_signable_bundles(
     Ok(bundles)
 }
 
-fn is_nested_signable_info_plist(path: &str, app_prefix: &str) -> bool {
-    let Some(relative) = path
+fn nested_signable_bundle_kind(path: &str, app_prefix: &str) -> Option<NestedBundleKind> {
+    let relative = path
         .strip_prefix(app_prefix)
-        .and_then(|path| path.strip_suffix("/Info.plist"))
-    else {
-        return false;
-    };
-    !relative.is_empty()
-        && relative
-            .rsplit('/')
-            .next()
-            .is_some_and(|folder| folder.ends_with(".appex") || folder.ends_with(".app"))
+        .and_then(|path| path.strip_suffix("/Info.plist"))?;
+    if relative.is_empty() {
+        return None;
+    }
+    let extension = Path::new(relative)
+        .extension()
+        .and_then(|extension| extension.to_str())?;
+    if extension.eq_ignore_ascii_case("appex") {
+        Some(NestedBundleKind::AppExtension)
+    } else if extension.eq_ignore_ascii_case("app") {
+        Some(NestedBundleKind::App)
+    } else {
+        None
+    }
 }
 
 fn is_app_info_plist(path: &str) -> bool {
@@ -470,6 +481,9 @@ async fn sign_ipa_async(
     extract_ipa(&request.source_path, work_dir.path(), &mut progress).await?;
     let app_path = root_app_bundle(work_dir.path())?;
     progress(IpaSigningProgress::Patching);
+    if request.strip_extensions {
+        strip_app_extensions(&app_path)?;
+    }
     patch_app_bundle(
         &app_path,
         &request.metadata,
@@ -521,6 +535,39 @@ async fn sign_ipa_async(
             source: error.error,
         })?;
     Ok(SigningArtifact::Ipa(output_path))
+}
+
+fn strip_app_extensions(app_path: &Path) -> BackendResult<()> {
+    let mut entries = WalkDir::new(app_path).follow_links(false).into_iter();
+    let mut extension_paths = Vec::new();
+
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|error| {
+            BackendError::Message(format!(
+                "Failed to inspect app extensions under {}: {error}",
+                app_path.display()
+            ))
+        })?;
+        if entry.file_type().is_dir()
+            && entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("appex"))
+        {
+            extension_paths.push(entry.into_path());
+            entries.skip_current_dir();
+        }
+    }
+
+    for path in extension_paths {
+        fs::remove_dir_all(&path).map_err(|source| BackendError::Io {
+            action: "Remove app extension",
+            path,
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 async fn extract_ipa(
@@ -1474,22 +1521,51 @@ mod tests {
     fn nested_signable_bundle_paths_include_extensions_and_nested_apps() {
         let root = "Payload/App.app/";
 
-        assert!(is_nested_signable_info_plist(
-            "Payload/App.app/PlugIns/Widget.appex/Info.plist",
-            root
-        ));
-        assert!(is_nested_signable_info_plist(
-            "Payload/App.app/Watch/WatchApp.app/Info.plist",
-            root
-        ));
-        assert!(!is_nested_signable_info_plist(
-            "Payload/App.app/Frameworks/Example.framework/Info.plist",
-            root
-        ));
-        assert!(!is_nested_signable_info_plist(
-            "Payload/App.app/Info.plist",
-            root
-        ));
+        assert_eq!(
+            nested_signable_bundle_kind("Payload/App.app/PlugIns/Widget.appex/Info.plist", root),
+            Some(NestedBundleKind::AppExtension)
+        );
+        assert_eq!(
+            nested_signable_bundle_kind("Payload/App.app/Watch/WatchApp.app/Info.plist", root),
+            Some(NestedBundleKind::App)
+        );
+        assert_eq!(
+            nested_signable_bundle_kind(
+                "Payload/App.app/Frameworks/Example.framework/Info.plist",
+                root
+            ),
+            None
+        );
+        assert_eq!(
+            nested_signable_bundle_kind("Payload/App.app/Info.plist", root),
+            None
+        );
+    }
+
+    #[test]
+    fn stripping_extensions_preserves_nested_apps_and_frameworks() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_path = temp.path().join("Payload").join("Test.app");
+        let extension_path = app_path.join("PlugIns").join("Widget.appex");
+        let nested_app_path = app_path.join("Watch").join("WatchApp.app");
+        let nested_extension_path = nested_app_path.join("PlugIns").join("Companion.appex");
+        let framework_path = app_path.join("Frameworks").join("Example.framework");
+        for path in [
+            &extension_path,
+            &nested_app_path,
+            &nested_extension_path,
+            &framework_path,
+        ] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("content"), b"test").unwrap();
+        }
+
+        strip_app_extensions(&app_path).unwrap();
+
+        assert!(!extension_path.exists());
+        assert!(!nested_extension_path.exists());
+        assert!(nested_app_path.exists());
+        assert!(framework_path.exists());
     }
 
     #[test]

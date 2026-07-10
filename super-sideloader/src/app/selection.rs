@@ -126,6 +126,7 @@ mod tests {
                 vec![SupportedDeviceFamily::IPhone],
             ),
             nested_bundles: Vec::new(),
+            strip_extensions: false,
             path: path.to_string(),
             icon_path: None,
             icon_override_path: None,

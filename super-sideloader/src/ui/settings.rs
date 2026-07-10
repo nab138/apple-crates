@@ -2883,6 +2883,24 @@ impl SettingsWindow {
         .detach();
     }
 
+    fn set_strip_extensions(
+        &mut self,
+        checked: &bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let Some(mut snapshot) = self.app_settings_snapshot(cx) else {
+            return;
+        };
+        if snapshot.app.app_extension_count() == 0 {
+            return;
+        }
+        snapshot.app.strip_extensions = *checked;
+        self.replace_app_in_parent(snapshot.app_index, snapshot.app, cx);
+        cx.notify();
+    }
+
     fn begin_app_detail_edit(
         &mut self,
         field: AppMetadataField,
@@ -3430,6 +3448,7 @@ mod tests {
                 vec![SupportedDeviceFamily::IPhone],
             ),
             nested_bundles: Vec::new(),
+            strip_extensions: false,
             path: format!("/tmp/{name}.ipa"),
             icon_path: None,
             icon_override_path: None,

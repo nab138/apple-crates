@@ -1,5 +1,5 @@
 use super::*;
-use gpui_component::{checkbox::Checkbox, Sizable as _};
+use gpui_component::{checkbox::Checkbox, Disableable as _, Sizable as _};
 
 pub(super) struct AppViewProps<'a> {
     pub(super) focus_handle: &'a FocusHandle,
@@ -130,6 +130,7 @@ pub(super) fn render(props: AppViewProps<'_>, cx: &mut Context<SettingsWindow>) 
                         .child(read_only_app_detail_row("IPA", app.path.to_string()))
                         .child(read_only_app_detail_row("Patches", patch_summary)),
                 )
+                .child(strip_extensions_checkbox(app, cx))
                 .child(entitlements_table(
                     app,
                     team_id,
@@ -139,6 +140,56 @@ pub(super) fn render(props: AppViewProps<'_>, cx: &mut Context<SettingsWindow>) 
                     cx,
                 )),
         ))
+}
+
+fn strip_extensions_checkbox(
+    app: &AppOption,
+    cx: &mut Context<SettingsWindow>,
+) -> impl IntoElement {
+    let extension_count = app.app_extension_count();
+    let detail = match extension_count {
+        0 => "No embedded app extensions were detected in this IPA.".to_string(),
+        1 => "Remove the embedded app extension before signing. Its App ID and profile will not be required."
+            .to_string(),
+        count => format!(
+            "Remove {count} embedded app extensions before signing. Their App IDs and profiles will not be required."
+        ),
+    };
+
+    Checkbox::new("strip-app-extensions")
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0xd8e0df))
+        .bg(rgb(0xffffff))
+        .hover(|style| style.bg(rgb(0xf6f9f9)))
+        .items_center()
+        .small()
+        .checked(app.strip_extensions)
+        .disabled(extension_count == 0)
+        .on_click(cx.listener(SettingsWindow::set_strip_extensions))
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_1()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x24333a))
+                        .child("Strip app extensions"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x6a7a81))
+                        .whitespace_normal()
+                        .child(detail),
+                ),
+        )
 }
 
 fn app_settings_error(error: SharedString) -> impl IntoElement {

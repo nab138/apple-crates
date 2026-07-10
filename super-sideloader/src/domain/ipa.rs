@@ -41,6 +41,13 @@ pub(crate) struct AppMetadata {
 pub(crate) struct NestedBundle {
     pub(crate) name: String,
     pub(crate) bundle_id: String,
+    pub(crate) kind: NestedBundleKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NestedBundleKind {
+    App,
+    AppExtension,
 }
 
 #[derive(Clone, Debug, PartialEq)]
