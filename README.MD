@@ -72,6 +72,10 @@ That Sideloader rewrite in Rust I postponed. Work-in-progress.
 
 The icons have been taken from the Lucide icon set. See the license in [LICENSE-lucide.md].
 
+Should mostly work. The frontend is heavily AI generated though, so there are probably a lot of rough edges.
+
+I need to change that bundle-id too, before packaging it for macOS and Linux. And I should try to make it work on Windows.
+
 ### there should be a separate xcode api crate
 
 but I did not start to work on it :p
