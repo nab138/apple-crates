@@ -16,9 +16,10 @@ use grandslam::http_session::AnisetteHTTPSession;
 #[cfg(target_os = "windows")]
 use ouroboros::self_referencing;
 use std::ffi::CString;
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt as _;
 
 const ANDROID_COREADI_APK_URL: &str =
     "https://apps.mzstatic.com/content/android-apple-music-apk/applemusic.apk";
@@ -347,7 +348,10 @@ fn android_coreadi_backend(android_adi_identifier: &str) -> AdiBackend {
     };
 
     let library_path = android_coreadi_library_path();
-    let availability = if library_path.as_ref().is_some_and(|path| path.exists()) {
+    let availability = if library_path
+        .as_ref()
+        .is_some_and(|path| installed_library_exists(path))
+    {
         AdiBackendAvailability::Ready
     } else {
         AdiBackendAvailability::NeedsSetup
@@ -408,7 +412,7 @@ fn android_coreadi_provisioning_path() -> Option<PathBuf> {
     app_data_dir().map(|path| path.join("coreadi"))
 }
 
-pub(crate) fn download_android_coreadi_apk(
+pub(crate) async fn download_android_coreadi_apk(
     mut progress: impl FnMut(AndroidCoreAdiInstallProgress),
 ) -> BackendResult<PathBuf> {
     let _ = android_coreadi_abi().ok_or_else(|| {
@@ -421,67 +425,115 @@ pub(crate) fn download_android_coreadi_apk(
         BackendError::Unsupported("The application data folder is not available.".to_string())
     })?;
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| BackendError::Io {
-            action: "Create Apple Music APK folder",
-            path: parent.to_path_buf(),
-            source: error,
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| BackendError::Io {
+                action: "Create Apple Music APK folder",
+                path: parent.to_path_buf(),
+                source: error,
+            })?;
     }
 
-    let mut response = reqwest::blocking::Client::new()
+    let mut response = reqwest::Client::new()
         .get(ANDROID_COREADI_APK_URL)
         .send()
+        .await
         .and_then(|response| response.error_for_status())
         .map_err(|error| {
             BackendError::Network(format!("Failed to download Apple Music APK: {error}"))
         })?;
     let total_bytes = response.content_length();
-    let mut file = File::create(&destination).map_err(|error| BackendError::Io {
-        action: "Create Apple Music APK",
-        path: destination.clone(),
-        source: error,
-    })?;
+    let partial_destination = partial_file_path(&destination);
+    let mut file = File::create(&partial_destination)
+        .await
+        .map_err(|error| BackendError::Io {
+            action: "Create Apple Music APK",
+            path: partial_destination.clone(),
+            source: error,
+        })?;
     let mut downloaded_bytes = 0;
-    let mut buffer = [0; 64 * 1024];
     progress(AndroidCoreAdiInstallProgress {
         downloaded_bytes,
         total_bytes,
     });
 
-    loop {
-        let read = response.read(&mut buffer).map_err(|error| {
-            BackendError::Network(format!("Failed to download Apple Music APK: {error}"))
-        })?;
-        if read == 0 {
-            break;
-        }
-
-        file.write_all(&buffer[..read])
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        BackendError::Network(format!("Failed to download Apple Music APK: {error}"))
+    })? {
+        file.write_all(&chunk)
+            .await
             .map_err(|error| BackendError::Io {
                 action: "Save Apple Music APK",
-                path: destination.clone(),
+                path: partial_destination.clone(),
                 source: error,
             })?;
-        downloaded_bytes += read as u64;
+        downloaded_bytes += chunk.len() as u64;
         progress(AndroidCoreAdiInstallProgress {
             downloaded_bytes,
             total_bytes,
         });
     }
 
-    file.flush().map_err(|error| BackendError::Io {
+    file.flush().await.map_err(|error| BackendError::Io {
         action: "Flush Apple Music APK",
-        path: destination.clone(),
+        path: partial_destination.clone(),
         source: error,
     })?;
+    drop(file);
 
     if downloaded_bytes == 0 {
+        let _ = tokio::fs::remove_file(&partial_destination).await;
         return Err(BackendError::Adi(
             "Downloaded Apple Music APK is empty.".to_string(),
         ));
     }
 
+    publish_partial_file(
+        &partial_destination,
+        &destination,
+        "Publish Apple Music APK",
+    )
+    .await?;
+
     Ok(destination)
+}
+
+fn installed_library_exists(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
+fn partial_file_path(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    destination.with_file_name(format!("{file_name}.part"))
+}
+
+async fn publish_partial_file(
+    partial: &Path,
+    destination: &Path,
+    action: &'static str,
+) -> BackendResult<()> {
+    match tokio::fs::remove_file(destination).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(BackendError::Io {
+                action,
+                path: destination.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    tokio::fs::rename(partial, destination)
+        .await
+        .map_err(|source| BackendError::Io {
+            action,
+            path: destination.to_path_buf(),
+            source,
+        })
 }
 
 pub(crate) async fn download_and_install_android_coreadi(
@@ -490,7 +542,8 @@ pub(crate) async fn download_and_install_android_coreadi(
     backend_runtime::run_send("CoreADI install", async move {
         let apk_path = download_android_coreadi_apk(|download| {
             progress(AndroidCoreAdiInstallEvent::Downloading(download));
-        })?;
+        })
+        .await?;
         progress(AndroidCoreAdiInstallEvent::Installing);
         install_android_coreadi_from_apk_async(apk_path).await
     })
@@ -540,17 +593,24 @@ async fn install_android_coreadi_from_apk_async(apk_path: PathBuf) -> BackendRes
         BackendError::Unsupported("The application data folder is not available.".to_string())
     })?;
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| BackendError::Io {
-            action: "Create CoreADI folder",
-            path: parent.to_path_buf(),
-            source: error,
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| BackendError::Io {
+                action: "Create CoreADI folder",
+                path: parent.to_path_buf(),
+                source: error,
+            })?;
     }
-    let mut destination_file = File::create(&destination).map_err(|error| BackendError::Io {
-        action: "Create CoreADI destination",
-        path: destination.clone(),
-        source: error,
-    })?;
+    let partial_destination = partial_file_path(&destination);
+    let mut destination_file =
+        File::create(&partial_destination)
+            .await
+            .map_err(|error| BackendError::Io {
+                action: "Create CoreADI destination",
+                path: partial_destination.clone(),
+                source: error,
+            })?;
+    let mut written_bytes = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = entry_reader.read(&mut buffer).await.map_err(|error| {
@@ -559,19 +619,36 @@ async fn install_android_coreadi_from_apk_async(apk_path: PathBuf) -> BackendRes
         if read == 0 {
             break;
         }
+
         destination_file
             .write_all(&buffer[..read])
+            .await
             .map_err(|error| BackendError::Io {
                 action: "Store CoreADI",
-                path: destination.clone(),
+                path: partial_destination.clone(),
                 source: error,
             })?;
+        written_bytes += read as u64;
     }
-    destination_file.flush().map_err(|error| BackendError::Io {
-        action: "Flush CoreADI",
-        path: destination.clone(),
-        source: error,
-    })?;
+
+    destination_file
+        .flush()
+        .await
+        .map_err(|error| BackendError::Io {
+            action: "Flush CoreADI",
+            path: partial_destination.clone(),
+            source: error,
+        })?;
+    drop(destination_file);
+
+    if written_bytes == 0 {
+        let _ = tokio::fs::remove_file(&partial_destination).await;
+        return Err(BackendError::Zip(
+            "APK contains an empty CoreADI library.".to_string(),
+        ));
+    }
+
+    publish_partial_file(&partial_destination, &destination, "Publish CoreADI").await?;
 
     Ok(destination)
 }
@@ -670,5 +747,26 @@ mod tests {
                 .iter()
                 .any(|backend| backend.kind == AdiBackendKind::AndroidCoreAdi));
         }
+    }
+
+    #[test]
+    fn installed_library_requires_a_nonempty_regular_file() {
+        let temp = tempfile::tempdir().expect("temporary directory should be created");
+        let library = temp.path().join(ANDROID_COREADI_LIBRARY_FILE);
+
+        assert!(!installed_library_exists(&library));
+        fs::write(&library, []).expect("empty library should be created");
+        assert!(!installed_library_exists(&library));
+        fs::write(&library, [1]).expect("nonempty library should be created");
+        assert!(installed_library_exists(&library));
+        assert!(!installed_library_exists(temp.path()));
+    }
+
+    #[test]
+    fn partial_file_is_stored_next_to_its_destination() {
+        assert_eq!(
+            partial_file_path(Path::new("/data/x86_64/libCoreADI.so")),
+            PathBuf::from("/data/x86_64/libCoreADI.so.part")
+        );
     }
 }

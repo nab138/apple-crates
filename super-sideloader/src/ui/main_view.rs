@@ -4,7 +4,7 @@ use crate::app::models::{
     SideloadOperation, SideloadPhase,
 };
 use crate::app::preferences::{apply_app_overrides, AppOverridePreferences};
-use crate::app::state::SideloaderState;
+use crate::app::state::{SideloadReadiness, SideloaderState};
 use crate::app::AppError;
 use crate::constants::*;
 use crate::ui::settings::{show_or_open_settings_window, SettingsMode, SettingsWindowHandle};
@@ -2017,12 +2017,42 @@ fn developer_team_count(account: &AccountOption) -> String {
     }
 }
 
-fn sideload_top_label(operation: &SideloadOperation) -> &'static str {
-    match operation {
-        SideloadOperation::Idle => "Draft",
-        SideloadOperation::Running { phase, .. } => sideload_phase_label(*phase),
-        SideloadOperation::Finished { .. } => "Done",
-        SideloadOperation::Failed { .. } => "Failed",
+struct HeaderStatus {
+    label: &'static str,
+    color: u32,
+    icon: &'static str,
+}
+
+fn header_status(state: &SideloaderState) -> HeaderStatus {
+    if let SideloadOperation::Running { phase, .. } = &state.sideload_operation {
+        return HeaderStatus {
+            label: sideload_phase_label(*phase),
+            color: 0x173f45,
+            icon: "icons/refresh-cw.svg",
+        };
+    }
+
+    let readiness = state.sideload_readiness();
+    if readiness != SideloadReadiness::Ready {
+        return HeaderStatus {
+            label: readiness.label(),
+            color: 0x9a5b13,
+            icon: "icons/triangle-alert.svg",
+        };
+    }
+
+    match &state.sideload_operation {
+        SideloadOperation::Failed { .. } => HeaderStatus {
+            label: "Action failed",
+            color: 0x9a302b,
+            icon: "icons/triangle-alert.svg",
+        },
+        SideloadOperation::Idle | SideloadOperation::Finished { .. } => HeaderStatus {
+            label: readiness.label(),
+            color: 0x1d6b45,
+            icon: "icons/check.svg",
+        },
+        SideloadOperation::Running { .. } => unreachable!("running status returned above"),
     }
 }
 
@@ -2185,7 +2215,7 @@ impl Render for SideloaderView {
             self.spinner_turns = 0.;
         }
 
-        let status_color = sideload_status_color(&self.sideload_operation);
+        let header_status = header_status(&self.state);
 
         div()
             .track_focus(&self.focus_handle)
@@ -2255,13 +2285,17 @@ impl Render for SideloaderView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(div().w_2().h_2().rounded_full().bg(rgb(status_color)))
+                                    .child(lucide_icon_tinted(
+                                        header_status.icon,
+                                        header_status.color,
+                                    ))
                                     .child(
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(status_color))
-                                            .child(sideload_top_label(&self.sideload_operation)),
+                                            .text_color(rgb(header_status.color))
+                                            .whitespace_normal()
+                                            .child(header_status.label),
                                     ),
                             )
                             .child(

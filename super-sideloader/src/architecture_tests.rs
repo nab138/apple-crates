@@ -241,3 +241,10 @@ fn only_shared_backend_runtime_builds_tokio_runtimes() {
         assert_absent(&module, &source, &forbidden);
     }
 }
+
+#[test]
+fn backend_modules_do_not_use_blocking_reqwest() {
+    for (module, source) in rust_files_under("src/backend") {
+        assert_absent(&module, &source, &["reqwest::blocking"]);
+    }
+}

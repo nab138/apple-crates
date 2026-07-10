@@ -21,6 +21,33 @@ pub(crate) struct LoadedSideloaderState {
     pub(crate) should_save_preferences: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SideloadReadiness {
+    Ready,
+    NeedsAdi,
+    NeedsAccount,
+    NeedsTeam,
+    NeedsCertificate,
+    NeedsAppId,
+    NeedsApp,
+    NeedsDevice,
+}
+
+impl SideloadReadiness {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::NeedsAdi => "Set up CoreADI",
+            Self::NeedsAccount => "Log in to your account",
+            Self::NeedsTeam => "Select a developer team",
+            Self::NeedsCertificate => "Set up a certificate",
+            Self::NeedsAppId => "Select an App ID",
+            Self::NeedsApp => "Select an IPA",
+            Self::NeedsDevice => "Connect a device",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SideloaderState {
     pub(crate) theme_preference: ThemePreference,
@@ -159,6 +186,41 @@ impl SideloaderState {
 
     pub(crate) fn selected_device(&self) -> Option<&DeviceOption> {
         self.device_selection.selected()
+    }
+
+    pub(crate) fn sideload_readiness(&self) -> SideloadReadiness {
+        if !self
+            .adi_backends
+            .get(self.selected_adi_backend)
+            .is_some_and(|backend| backend.availability.is_ready())
+        {
+            return SideloadReadiness::NeedsAdi;
+        }
+        let Some(account) = self.selected_account() else {
+            return SideloadReadiness::NeedsAccount;
+        };
+        let Some(team) = account.teams.get(self.selected_team) else {
+            return SideloadReadiness::NeedsTeam;
+        };
+        let Some(certificate) = team.certificates.get(self.selected_certificate) else {
+            return SideloadReadiness::NeedsCertificate;
+        };
+        if !certificate.private_key_available
+            || certificate.certificate_fingerprint.is_none()
+            || certificate.public_key_fingerprint.is_none()
+        {
+            return SideloadReadiness::NeedsCertificate;
+        }
+        if !self.auto_app_id && team.app_ids.get(self.selected_app_id).is_none() {
+            return SideloadReadiness::NeedsAppId;
+        }
+        if self.selected_app().is_none() {
+            return SideloadReadiness::NeedsApp;
+        }
+        if self.selected_device().is_none() {
+            return SideloadReadiness::NeedsDevice;
+        }
+        SideloadReadiness::Ready
     }
 
     pub(crate) fn select_team(&mut self, index: usize) -> Option<String> {
@@ -558,9 +620,12 @@ fn random_android_adi_identifier() -> String {
 mod tests {
     use super::*;
     use crate::app::models::{
-        AdiBackendAvailability, AdiBackendDetail, AdiProvisioningState, AppIdOption,
-        DevelopmentCertificateOption,
+        AdiBackendAvailability, AdiBackendDetail, AdiProvisioningState, AppIdOption, AppMetadata,
+        AppOption, DevelopmentCertificateOption, DeviceOption, EntitlementsSource,
+        SupportedDeviceFamily,
     };
+    use crate::app::AppError;
+    use std::path::Path;
 
     fn app_id(identifier: &str) -> AppIdOption {
         AppIdOption {
@@ -622,6 +687,104 @@ mod tests {
             editable_identity: false,
             repair_action: None,
         }
+    }
+
+    fn empty_state() -> SideloaderState {
+        let identity = MachineIdentity {
+            machine_name: "Mac".to_string(),
+            os_name: "macOS".to_string(),
+            os_version: "15".to_string(),
+            machine_id: "machine-id".to_string(),
+        };
+        SideloaderState {
+            theme_preference: ThemePreference::System,
+            accounts: Vec::new(),
+            app_selection: AppSelection::default(),
+            device_selection: DeviceSelection::default(),
+            adi_backends: Vec::new(),
+            selected_account: 0,
+            selected_team: 0,
+            selected_certificate: 0,
+            auto_app_id: true,
+            selected_app_id: 0,
+            selected_adi_backend: 0,
+            machine_identity: identity.clone(),
+            android_device_identity: identity,
+            android_adi_identifier: "0123456789abcdef".to_string(),
+            enabled_patches: Vec::new(),
+            sideload_operation: SideloadOperation::Idle,
+        }
+    }
+
+    fn sample_app() -> AppOption {
+        AppOption {
+            metadata: AppMetadata::sample(
+                "Example",
+                "com.example.app",
+                "1.0",
+                "1",
+                "Example",
+                "16.0",
+                vec![SupportedDeviceFamily::IPhone],
+            ),
+            nested_bundles: Vec::new(),
+            path: "/tmp/Example.ipa".to_string(),
+            icon_path: None,
+            icon_override_path: None,
+            entitlements: Vec::new(),
+            entitlements_source: EntitlementsSource::GeneratedFallback,
+            entitlement_overrides: None,
+            patches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sideload_readiness_reports_the_first_required_setup_step() {
+        let mut state = empty_state();
+        assert_eq!(state.sideload_readiness(), SideloadReadiness::NeedsAdi);
+
+        state.adi_backends = vec![backend(
+            AdiBackendKind::AndroidCoreAdi,
+            AdiBackendAvailability::Ready,
+        )];
+        assert_eq!(state.sideload_readiness(), SideloadReadiness::NeedsAccount);
+
+        state.accounts = vec![account("account", Vec::new())];
+        assert_eq!(state.sideload_readiness(), SideloadReadiness::NeedsTeam);
+
+        state.accounts[0].teams = vec![team("TEAM", Vec::new(), Vec::new())];
+        assert_eq!(
+            state.sideload_readiness(),
+            SideloadReadiness::NeedsCertificate
+        );
+
+        state.accounts[0].teams[0].certificates = vec![certificate("SERIAL")];
+        assert_eq!(state.sideload_readiness(), SideloadReadiness::NeedsApp);
+
+        state.app_selection.finish_loading(
+            Path::new("/tmp/Example.ipa"),
+            Ok::<_, AppError>(sample_app()),
+        );
+        assert_eq!(state.sideload_readiness(), SideloadReadiness::NeedsDevice);
+
+        let generation = state.device_selection.begin_refresh().unwrap();
+        state.device_selection.finish_refresh(
+            generation,
+            Ok(vec![DeviceOption {
+                name: "iPhone".to_string(),
+                model: "iPhone17,1".to_string(),
+                os: "iOS 19".to_string(),
+                udid: "device-udid".to_string(),
+                connection: "USB".to_string(),
+            }]),
+        );
+        assert_eq!(state.sideload_readiness(), SideloadReadiness::Ready);
+
+        state.accounts[0].teams[0].certificates[0].private_key_available = false;
+        assert_eq!(
+            state.sideload_readiness(),
+            SideloadReadiness::NeedsCertificate
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::models::AdiBackendAvailability;
 
 pub(super) struct AdiViewProps<'a> {
     pub(super) focus_handle: &'a FocusHandle,
@@ -517,10 +518,7 @@ fn adi_backend_status_section(
                     },
                 )
                 .when(
-                    matches!(
-                        &backend.provisioning_state,
-                        AdiProvisioningState::NotProvisioned | AdiProvisioningState::Error(_)
-                    ),
+                    should_show_provision_action(backend.availability, &backend.provisioning_state),
                     |this| {
                         this.child(adi_provision_button(
                             provisioning_operation,
@@ -545,6 +543,17 @@ fn adi_backend_status_section(
                         this.child(android_coreadi_apk_link(adi_operation.is_some(), cx))
                     })
                 }),
+        )
+}
+
+fn should_show_provision_action(
+    availability: AdiBackendAvailability,
+    provisioning_state: &AdiProvisioningState,
+) -> bool {
+    availability.is_ready()
+        && matches!(
+            provisioning_state,
+            AdiProvisioningState::NotProvisioned | AdiProvisioningState::Error(_)
         )
 }
 
@@ -935,4 +944,31 @@ fn read_only_badge() -> gpui::Div {
         .items_center()
         .justify_center()
         .child("Read-only")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisioning_action_requires_a_ready_backend() {
+        let error = AdiProvisioningState::Error("installation failed".to_string());
+
+        assert!(!should_show_provision_action(
+            AdiBackendAvailability::NeedsSetup,
+            &error
+        ));
+        assert!(should_show_provision_action(
+            AdiBackendAvailability::Ready,
+            &error
+        ));
+        assert!(should_show_provision_action(
+            AdiBackendAvailability::Ready,
+            &AdiProvisioningState::NotProvisioned
+        ));
+        assert!(!should_show_provision_action(
+            AdiBackendAvailability::Ready,
+            &AdiProvisioningState::Provisioned
+        ));
+    }
 }

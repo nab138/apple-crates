@@ -26,7 +26,7 @@ log = "0.4.33"
 plist.workspace = true
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 rand = "0.10.2"
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest.workspace = true
 serde = { version = "1.0.228", features = ["derive"] }
 sha1.workspace = true
 thiserror.workspace = true
