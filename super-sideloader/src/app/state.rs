@@ -63,6 +63,7 @@ pub(crate) struct SideloaderState {
     pub(crate) selected_adi_backend: usize,
     pub(crate) machine_identity: MachineIdentity,
     pub(crate) android_device_identity: MachineIdentity,
+    pub(crate) android_device_identity_customized: bool,
     pub(crate) android_adi_identifier: String,
     pub(crate) enabled_patches: Vec<bool>,
     pub(crate) sideload_operation: SideloadOperation,
@@ -86,11 +87,11 @@ impl SideloaderState {
             .or_else(|| preferences.adi.android_device_uuid.clone())
             .unwrap_or_default();
         let generated_android_device_uuid = ensure_android_device_uuid(&mut android_device_uuid);
-        let mut android_device_identity =
-            android_device_identity_from_host(&machine_identity, android_device_uuid);
-        apply_machine_identity_preferences(
-            &mut android_device_identity,
+        let android_device_identity_customized = preferences.adi.android_device_identity_customized;
+        let android_device_identity = android_adi_identity(
+            android_device_uuid,
             &preferences.adi.android_device,
+            android_device_identity_customized,
         );
         let mut android_adi_identifier = preferences
             .adi
@@ -150,6 +151,7 @@ impl SideloaderState {
                 selected_adi_backend,
                 machine_identity,
                 android_device_identity,
+                android_device_identity_customized,
                 android_adi_identifier,
                 enabled_patches,
                 sideload_operation: SideloadOperation::Idle,
@@ -246,14 +248,34 @@ impl SideloaderState {
             .filter(|backend| backend.availability.is_ready())
             .map(|backend| backend.kind)
             .ok_or_else(|| "No ready ADI backend is available.".to_string())?;
+        let machine_identity = self.adi_machine_identity(adi_backend);
 
         Ok(DeveloperSessionContext::new(
             account.id.to_string(),
             account.apple_id.to_string(),
             adi_backend,
-            self.machine_identity.clone(),
+            machine_identity.clone(),
             self.android_adi_identifier.clone(),
         ))
+    }
+
+    pub(crate) fn adi_machine_identity(&self, backend: AdiBackendKind) -> &MachineIdentity {
+        Self::machine_identity_for_adi_backend(
+            backend,
+            &self.machine_identity,
+            &self.android_device_identity,
+        )
+    }
+
+    pub(crate) fn machine_identity_for_adi_backend<'a>(
+        backend: AdiBackendKind,
+        host_identity: &'a MachineIdentity,
+        android_identity: &'a MachineIdentity,
+    ) -> &'a MachineIdentity {
+        match backend {
+            AdiBackendKind::AndroidCoreAdi => android_identity,
+            AdiBackendKind::SystemAdid | AdiBackendKind::WindowsCoreAdi => host_identity,
+        }
     }
 
     pub(crate) fn default_developer_app_id_fields(
@@ -342,6 +364,7 @@ impl SideloaderState {
 
     pub(crate) fn replace_android_device_identity(&mut self, identity: MachineIdentity) {
         self.android_device_identity = identity;
+        self.android_device_identity_customized = true;
     }
 
     pub(crate) fn refresh_adi_backends(&mut self) {
@@ -390,6 +413,7 @@ impl SideloaderState {
                 android_adi_identifier: Some(self.android_adi_identifier.clone()),
                 android_device: MachineIdentityPreferences::from(&self.android_device_identity),
                 android_device_uuid: Some(self.android_device_identity.machine_id.to_string()),
+                android_device_identity_customized: self.android_device_identity_customized,
                 android_machine: MachineIdentityPreferences::default(),
             },
         }
@@ -575,16 +599,25 @@ fn is_uuid(identifier: &str) -> bool {
     uuid::Uuid::parse_str(identifier).is_ok()
 }
 
-fn android_device_identity_from_host(
-    host_identity: &MachineIdentity,
-    device_uuid: String,
-) -> MachineIdentity {
+fn default_android_adi_identity(device_uuid: String) -> MachineIdentity {
     MachineIdentity {
-        machine_name: host_identity.machine_name.clone(),
-        os_name: host_identity.os_name.clone(),
-        os_version: host_identity.os_version.clone(),
+        machine_name: "MacBookPro13,2".to_string(),
+        os_name: "macOS".to_string(),
+        os_version: "13.1;22C65".to_string(),
         machine_id: device_uuid,
     }
+}
+
+fn android_adi_identity(
+    device_uuid: String,
+    preferences: &MachineIdentityPreferences,
+    customized: bool,
+) -> MachineIdentity {
+    let mut identity = default_android_adi_identity(device_uuid);
+    if customized {
+        apply_machine_identity_preferences(&mut identity, preferences);
+    }
+    identity
 }
 
 fn apply_machine_identity_preferences(
@@ -710,6 +743,7 @@ mod tests {
             selected_adi_backend: 0,
             machine_identity: identity.clone(),
             android_device_identity: identity,
+            android_device_identity_customized: false,
             android_adi_identifier: "0123456789abcdef".to_string(),
             enabled_patches: Vec::new(),
             sideload_operation: SideloadOperation::Idle,
@@ -964,24 +998,20 @@ mod tests {
 
     #[test]
     fn machine_identity_preferences_override_android_identity_fields() {
-        let host_identity = MachineIdentity {
-            machine_name: "Host".to_string(),
-            os_name: "macOS".to_string(),
-            os_version: "15.0".to_string(),
-            machine_id: "HOST-ID".to_string(),
+        let preferences = MachineIdentityPreferences {
+            machine_name: Some("Android Device".to_string()),
+            os_name: None,
+            os_version: Some("14".to_string()),
+            machine_id: Some("PERSISTED-ID".to_string()),
         };
-        let mut android_identity =
-            android_device_identity_from_host(&host_identity, "ANDROID-ID".to_string());
+        let default_identity = android_adi_identity("ANDROID-ID".to_string(), &preferences, false);
 
-        apply_machine_identity_preferences(
-            &mut android_identity,
-            &MachineIdentityPreferences {
-                machine_name: Some("Android Device".to_string()),
-                os_name: None,
-                os_version: Some("14".to_string()),
-                machine_id: Some("PERSISTED-ID".to_string()),
-            },
-        );
+        assert_eq!(default_identity.machine_name, "MacBookPro13,2");
+        assert_eq!(default_identity.os_name, "macOS");
+        assert_eq!(default_identity.os_version, "13.1;22C65");
+        assert_eq!(default_identity.machine_id, "ANDROID-ID");
+
+        let android_identity = android_adi_identity("ANDROID-ID".to_string(), &preferences, true);
 
         assert_eq!(android_identity.machine_name, "Android Device");
         assert_eq!(android_identity.os_name, "macOS");

@@ -33,12 +33,15 @@ pub(super) fn render(props: AdiViewProps<'_>, cx: &mut Context<SettingsWindow>) 
     } = props;
     let selected = selected_backend.min(backends.len().saturating_sub(1));
     let backend = backends.get(selected);
-    let displayed_machine_identity: &MachineIdentity = match backend.map(|backend| backend.kind) {
-        Some(AdiBackendKind::AndroidCoreAdi) => android_device_identity,
-        Some(AdiBackendKind::SystemAdid) | Some(AdiBackendKind::WindowsCoreAdi) | None => {
-            machine_identity
-        }
-    };
+    let displayed_machine_identity = backend
+        .map(|backend| {
+            SideloaderState::machine_identity_for_adi_backend(
+                backend.kind,
+                machine_identity,
+                android_device_identity,
+            )
+        })
+        .unwrap_or(machine_identity);
     let editable_identity = backend
         .map(|backend| backend.editable_identity)
         .unwrap_or(false);

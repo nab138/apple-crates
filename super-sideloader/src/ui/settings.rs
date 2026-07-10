@@ -488,10 +488,13 @@ impl SettingsSnapshot {
                     .adi_backends
                     .get(state.selected_adi_backend)
                     .and_then(|backend| backend.availability.is_ready().then_some(backend.kind));
+                let machine_identity = adi_backend
+                    .map(|backend| state.adi_machine_identity(backend).clone())
+                    .unwrap_or_else(|| state.machine_identity.clone());
 
                 Some(Self::DeveloperLogin(DeveloperLoginSnapshot {
                     adi_backend,
-                    machine_identity: state.machine_identity.clone(),
+                    machine_identity,
                     android_adi_identifier: state.android_adi_identifier.clone(),
                 }))
             }
@@ -2595,12 +2598,12 @@ impl SettingsWindow {
             .backends
             .get(snapshot.selected_backend)
             .map(|backend| {
-                let machine_identity = match backend.kind {
-                    AdiBackendKind::AndroidCoreAdi => snapshot.android_device_identity.clone(),
-                    AdiBackendKind::SystemAdid | AdiBackendKind::WindowsCoreAdi => {
-                        snapshot.machine_identity.clone()
-                    }
-                };
+                let machine_identity = SideloaderState::machine_identity_for_adi_backend(
+                    backend.kind,
+                    &snapshot.machine_identity,
+                    &snapshot.android_device_identity,
+                )
+                .clone();
                 (
                     backend.kind,
                     machine_identity,
@@ -3510,6 +3513,7 @@ mod tests {
             selected_adi_backend: 0,
             machine_identity: sample_identity("HOST"),
             android_device_identity: sample_identity("ANDROID"),
+            android_device_identity_customized: false,
             android_adi_identifier: "0123456789abcdef".to_string(),
             enabled_patches: Vec::new(),
             sideload_operation: SideloadOperation::Idle,
@@ -3586,6 +3590,43 @@ mod tests {
             panic!("app snapshot should be available");
         };
         assert_eq!(after_app.app.name(), "Fresh");
+    }
+
+    #[test]
+    fn developer_login_uses_the_current_adi_machine_identity() {
+        let mut state = sample_state();
+
+        let Some(SettingsSnapshot::DeveloperLogin(android_login)) =
+            SettingsSnapshot::from_state(&SettingsMode::DeveloperLogin, &state)
+        else {
+            panic!("developer login snapshot should be available");
+        };
+        assert_eq!(
+            android_login.adi_backend,
+            Some(AdiBackendKind::AndroidCoreAdi)
+        );
+        assert_eq!(android_login.machine_identity.machine_id, "ANDROID");
+
+        state.adi_backends[0].kind = AdiBackendKind::SystemAdid;
+        let Some(SettingsSnapshot::DeveloperLogin(system_login)) =
+            SettingsSnapshot::from_state(&SettingsMode::DeveloperLogin, &state)
+        else {
+            panic!("developer login snapshot should be available");
+        };
+        assert_eq!(system_login.adi_backend, Some(AdiBackendKind::SystemAdid));
+        assert_eq!(system_login.machine_identity.machine_id, "HOST");
+
+        state.adi_backends[0].kind = AdiBackendKind::WindowsCoreAdi;
+        let Some(SettingsSnapshot::DeveloperLogin(windows_login)) =
+            SettingsSnapshot::from_state(&SettingsMode::DeveloperLogin, &state)
+        else {
+            panic!("developer login snapshot should be available");
+        };
+        assert_eq!(
+            windows_login.adi_backend,
+            Some(AdiBackendKind::WindowsCoreAdi)
+        );
+        assert_eq!(windows_login.machine_identity.machine_id, "HOST");
     }
 }
 

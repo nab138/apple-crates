@@ -114,6 +114,7 @@ pub(crate) struct AdiPreferences {
     pub(crate) android_adi_identifier: Option<String>,
     pub(crate) android_device: MachineIdentityPreferences,
     pub(crate) android_device_uuid: Option<String>,
+    pub(crate) android_device_identity_customized: bool,
     #[serde(skip_serializing)]
     pub(crate) android_machine: MachineIdentityPreferences,
 }
