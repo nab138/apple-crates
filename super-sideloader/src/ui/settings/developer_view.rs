@@ -538,22 +538,28 @@ fn missing_private_key_warning(
 }
 
 fn certificate_actions(refreshing: bool, cx: &mut Context<SettingsWindow>) -> impl IntoElement {
-    div().flex().items_center().justify_end().child(
-        surface_button("revoke-certificate")
-            .h_7()
-            .when(refreshing, |this| this.opacity(0.45).tab_stop(false))
-            .when(!refreshing, |this| {
-                this.cursor_pointer()
-                    .on_click(cx.listener(SettingsWindow::revoke_certificate))
-            })
-            .child(action_button_surface(
-                "Revoke",
-                0xf4e9e7,
-                0xfff7f6,
-                0x7d3430,
-                Some(lucide_icon_tinted("icons/trash-2.svg", 0x7d3430)),
-            )),
-    )
+    div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .child(create_certificate_button(refreshing, cx))
+        .child(
+            surface_button("revoke-certificate")
+                .h_7()
+                .when(refreshing, |this| this.opacity(0.45).tab_stop(false))
+                .when(!refreshing, |this| {
+                    this.cursor_pointer()
+                        .on_click(cx.listener(SettingsWindow::revoke_certificate))
+                })
+                .child(action_button_surface(
+                    "Revoke",
+                    0xf4e9e7,
+                    0xfff7f6,
+                    0x7d3430,
+                    Some(lucide_icon_tinted("icons/trash-2.svg", 0x7d3430)),
+                )),
+        )
 }
 
 fn settings_certificate_row(
