@@ -22,6 +22,8 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            #[cfg(target_os = "linux")]
+            ui::prompt::install(cx);
 
             let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
             let bounds = Bounds::centered(None, window_size, cx);

@@ -1,7 +1,4 @@
-use crate::app::entitlements::{
-    effective_bundle_identifier, effective_bundle_identifier_for_app,
-    effective_nested_bundle_identifier,
-};
+use crate::app::entitlements::{effective_bundle_identifier, effective_nested_bundle_identifier};
 use crate::app::models::{
     AccountOption, AdiBackendKind, AdiBackendOption, AppIdOption, AppOption, DeveloperDeviceOption,
     DeviceOption, MachineIdentity, PatchOption, TeamOption,
@@ -69,6 +66,20 @@ impl AppIdProvisioningPlan {
         self.available_quantity
             .map(|available| available.saturating_sub(self.app_ids.len() as u64))
     }
+}
+
+#[derive(Clone, Debug)]
+struct SigningAppIdTarget {
+    registration_identifier: String,
+    bundle_identifier: String,
+    name: String,
+    existing: Option<AppIdOption>,
+}
+
+#[derive(Clone, Debug)]
+struct SigningAppIdTargets {
+    root: SigningAppIdTarget,
+    nested: Vec<SigningAppIdTarget>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -409,14 +420,20 @@ pub(crate) async fn sign_ipa(
     .map_err(AppError::from)?;
 
     progress(SignIpaProgress::ResolvingAppId);
-    let root_identifier = developer_app_identifier(&request.team_id, request.app.bundle_id());
+    let targets = signing_app_id_targets(
+        &request.team_id,
+        &request.team_app_ids,
+        request.auto_app_id,
+        request.selected_app_id.as_ref(),
+        &request.app,
+    )?;
     let (app_id, mut updated_account) = resolve_signing_app_id(
         request.developer_context.clone(),
         &request.team_id,
         &request.team_app_ids,
         request.auto_app_id,
-        request.selected_app_id,
-        &root_identifier,
+        request.selected_app_id.clone(),
+        &targets.root.registration_identifier,
         request.app.name(),
     )
     .await?;
@@ -425,8 +442,7 @@ pub(crate) async fn sign_ipa(
             "The selected App ID is missing its Xcode identifier. Refresh Developer Settings, then try again.",
         ));
     }
-    let expected_identifier = developer_app_identifier(&request.team_id, request.app.bundle_id());
-    if !app_id_matches_identifier(&app_id.identifier, &expected_identifier) {
+    if !app_id_matches_identifier(&app_id.identifier, &targets.root.bundle_identifier) {
         return Err(AppError::from(format!(
             "App ID {} does not match bundle identifier {}. Select a matching App ID in Developer Settings.",
             app_id.identifier,
@@ -438,32 +454,25 @@ pub(crate) async fn sign_ipa(
         .as_ref()
         .and_then(|account| team_app_ids_for_account(account, &request.team_id))
         .unwrap_or_else(|| request.team_app_ids.clone());
-    let effective_bundle_id = effective_bundle_identifier_for_app(&request.app, &request.team_id);
+    let effective_bundle_id = targets.root.bundle_identifier;
     let mut bundle_id_replacements = BTreeMap::from([(
         request.app.bundle_id().to_string(),
         effective_bundle_id.clone(),
     )]);
     let mut profile_requests = vec![(effective_bundle_id.clone(), app_id.developer_id)];
 
-    for nested_bundle in &request.app.nested_bundles {
-        let effective_nested_bundle_id = effective_nested_bundle_identifier(
-            request.app.original_bundle_id(),
-            request.app.bundle_id(),
-            &nested_bundle.bundle_id,
-            &request.team_id,
-        );
+    for (nested_bundle, target) in request.app.nested_bundles.iter().zip(targets.nested) {
         let (nested_app_id, account_update) = resolve_signing_app_id(
             request.developer_context.clone(),
             &request.team_id,
             &team_app_ids,
             true,
             None,
-            &effective_nested_bundle_id,
+            &target.registration_identifier,
             &nested_bundle.name,
         )
         .await?;
-        let expected_identifier = effective_nested_bundle_id.clone();
-        if !app_id_matches_identifier(&nested_app_id.identifier, &expected_identifier) {
+        if !app_id_matches_identifier(&nested_app_id.identifier, &target.bundle_identifier) {
             return Err(AppError::from(format!(
                 "App ID {} does not match nested bundle identifier {}.",
                 nested_app_id.identifier, nested_bundle.bundle_id
@@ -482,9 +491,9 @@ pub(crate) async fn sign_ipa(
         }
         bundle_id_replacements.insert(
             nested_bundle.bundle_id.clone(),
-            effective_nested_bundle_id.clone(),
+            target.bundle_identifier.clone(),
         );
-        profile_requests.push((effective_nested_bundle_id, nested_app_id.developer_id));
+        profile_requests.push((target.bundle_identifier, nested_app_id.developer_id));
     }
 
     progress(SignIpaProgress::DownloadingProfile);
@@ -538,41 +547,24 @@ pub(crate) fn app_id_provisioning_plan(
     selected_app_id: Option<AppIdOption>,
     app: &AppOption,
 ) -> AppResult<AppIdProvisioningPlan> {
+    let targets = signing_app_id_targets(
+        &team.identifier,
+        &team.app_ids,
+        auto_app_id,
+        selected_app_id.as_ref(),
+        app,
+    )?;
     let mut missing = BTreeMap::<String, String>::new();
-    let root_identifier = developer_app_identifier(&team.identifier, app.bundle_id());
 
-    if auto_app_id {
-        add_missing_app_id(
-            &mut missing,
-            &team.app_ids,
-            root_identifier,
-            app.name().to_string(),
-        );
-    } else {
-        let selected_app_id = selected_app_id.ok_or_else(|| {
-            AppError::from("Select an App ID in Developer Settings before signing.")
-        })?;
-        if !app_id_matches_identifier(&selected_app_id.identifier, &root_identifier) {
-            return Err(AppError::from(format!(
-                "App ID {} does not match bundle identifier {}. Select a matching App ID in Developer Settings.",
-                selected_app_id.identifier,
-                app.bundle_id()
-            )));
-        }
+    if targets.root.existing.is_none() {
+        missing.insert(targets.root.registration_identifier, targets.root.name);
     }
-
-    for nested_bundle in &app.nested_bundles {
-        add_missing_app_id(
-            &mut missing,
-            &team.app_ids,
-            effective_nested_bundle_identifier(
-                app.original_bundle_id(),
-                app.bundle_id(),
-                &nested_bundle.bundle_id,
-                &team.identifier,
-            ),
-            nested_bundle.name.clone(),
-        );
+    for target in targets.nested {
+        if target.existing.is_none() {
+            missing
+                .entry(target.registration_identifier)
+                .or_insert(target.name);
+        }
     }
 
     let app_ids = missing
@@ -595,18 +587,196 @@ pub(crate) fn app_id_provisioning_plan(
     })
 }
 
-fn add_missing_app_id(
-    missing: &mut BTreeMap<String, String>,
-    existing: &[AppIdOption],
-    identifier: String,
-    name: String,
-) {
-    if !existing
-        .iter()
-        .any(|app_id| app_id.identifier == identifier)
-    {
-        missing.entry(identifier).or_insert(name);
+fn signing_app_id_targets(
+    team_id: &str,
+    team_app_ids: &[AppIdOption],
+    auto_app_id: bool,
+    selected_app_id: Option<&AppIdOption>,
+    app: &AppOption,
+) -> AppResult<SigningAppIdTargets> {
+    let fallback_identifier = developer_app_identifier(team_id, app.bundle_id());
+    if !auto_app_id {
+        let selected = selected_app_id.ok_or_else(|| {
+            AppError::from("Select an App ID in Developer Settings before signing.")
+        })?;
+        if !app_id_matches_bundle(
+            &selected.identifier,
+            app.bundle_id(),
+            &fallback_identifier,
+            team_id,
+        ) {
+            return Err(AppError::from(format!(
+                "App ID {} does not match bundle identifier {}. Select a matching App ID in Developer Settings.",
+                selected.identifier,
+                app.bundle_id()
+            )));
+        }
+        let bundle_identifier = if selected.identifier.ends_with('*') {
+            fallback_identifier
+        } else {
+            selected.identifier.clone()
+        };
+        let root = SigningAppIdTarget {
+            registration_identifier: selected.identifier.clone(),
+            bundle_identifier: bundle_identifier.clone(),
+            name: app.name().to_string(),
+            existing: Some(selected.clone()),
+        };
+        return Ok(SigningAppIdTargets {
+            nested: nested_app_id_targets(team_id, team_app_ids, app, &bundle_identifier),
+            root,
+        });
     }
+
+    let canonical_bundle_id = identifier_without_team_component(app.bundle_id(), team_id);
+    let mut candidates = team_app_ids
+        .iter()
+        .filter(|app_id| {
+            !app_id.identifier.contains('*')
+                && identifier_without_team_component(&app_id.identifier, team_id)
+                    == canonical_bundle_id
+        })
+        .map(|app_id| SigningAppIdTarget {
+            registration_identifier: app_id.identifier.clone(),
+            bundle_identifier: app_id.identifier.clone(),
+            name: app.name().to_string(),
+            existing: Some(app_id.clone()),
+        })
+        .collect::<Vec<_>>();
+    if !candidates
+        .iter()
+        .any(|target| target.registration_identifier == fallback_identifier)
+    {
+        candidates.push(SigningAppIdTarget {
+            registration_identifier: fallback_identifier.clone(),
+            bundle_identifier: fallback_identifier.clone(),
+            name: app.name().to_string(),
+            existing: team_app_ids
+                .iter()
+                .find(|app_id| app_id.identifier == fallback_identifier)
+                .cloned(),
+        });
+    }
+
+    candidates
+        .into_iter()
+        .map(|root| {
+            let nested = nested_app_id_targets(team_id, team_app_ids, app, &root.bundle_identifier);
+            let missing = usize::from(root.existing.is_none())
+                + nested
+                    .iter()
+                    .filter(|target| target.existing.is_none())
+                    .count();
+            let preference =
+                if root.existing.is_some() && root.bundle_identifier == app.bundle_id().trim() {
+                    0
+                } else if root.existing.is_some() && root.bundle_identifier == fallback_identifier {
+                    1
+                } else if root.existing.is_some() {
+                    2
+                } else {
+                    3
+                };
+            (missing, preference, SigningAppIdTargets { root, nested })
+        })
+        .min_by_key(|(missing, preference, _)| (*missing, *preference))
+        .map(|(_, _, targets)| targets)
+        .ok_or_else(|| AppError::from("Could not determine the App IDs required for signing."))
+}
+
+fn nested_app_id_targets(
+    team_id: &str,
+    team_app_ids: &[AppIdOption],
+    app: &AppOption,
+    root_bundle_identifier: &str,
+) -> Vec<SigningAppIdTarget> {
+    app.nested_bundles
+        .iter()
+        .map(|nested_bundle| {
+            let desired_identifier = rebased_nested_bundle_identifier(
+                app.original_bundle_id(),
+                app.bundle_id(),
+                root_bundle_identifier,
+                &nested_bundle.bundle_id,
+                team_id,
+            );
+            let canonical_desired = identifier_without_team_component(&desired_identifier, team_id);
+            let root_prefix = format!("{root_bundle_identifier}.");
+            let existing = team_app_ids
+                .iter()
+                .find(|app_id| app_id.identifier == desired_identifier)
+                .or_else(|| {
+                    team_app_ids.iter().find(|app_id| {
+                        !app_id.identifier.contains('*')
+                            && app_id.identifier.starts_with(&root_prefix)
+                            && identifier_without_team_component(&app_id.identifier, team_id)
+                                == canonical_desired
+                    })
+                })
+                .cloned();
+            let identifier = existing
+                .as_ref()
+                .map(|app_id| app_id.identifier.clone())
+                .unwrap_or(desired_identifier);
+            SigningAppIdTarget {
+                registration_identifier: identifier.clone(),
+                bundle_identifier: identifier,
+                name: nested_bundle.name.clone(),
+                existing,
+            }
+        })
+        .collect()
+}
+
+fn rebased_nested_bundle_identifier(
+    original_root_bundle_id: &str,
+    current_root_bundle_id: &str,
+    effective_root_bundle_id: &str,
+    nested_bundle_id: &str,
+    team_id: &str,
+) -> String {
+    let original_root = identifier_without_team_component(original_root_bundle_id, team_id);
+    let current_root = identifier_without_team_component(current_root_bundle_id, team_id);
+    let nested = identifier_without_team_component(nested_bundle_id, team_id);
+    nested
+        .strip_prefix(&original_root)
+        .or_else(|| nested.strip_prefix(&current_root))
+        .filter(|suffix| suffix.starts_with('.'))
+        .map(|suffix| format!("{effective_root_bundle_id}{suffix}"))
+        .unwrap_or_else(|| {
+            effective_nested_bundle_identifier(
+                original_root_bundle_id,
+                current_root_bundle_id,
+                nested_bundle_id,
+                team_id,
+            )
+        })
+}
+
+fn identifier_without_team_component(identifier: &str, team_id: &str) -> String {
+    let team_id = team_id.trim();
+    if team_id.is_empty() {
+        return identifier.trim().to_string();
+    }
+    identifier
+        .trim()
+        .split('.')
+        .filter(|component| *component != team_id)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn app_id_matches_bundle(
+    app_id: &str,
+    bundle_id: &str,
+    fallback_identifier: &str,
+    team_id: &str,
+) -> bool {
+    app_id_matches_identifier(app_id, bundle_id)
+        || app_id_matches_identifier(app_id, fallback_identifier)
+        || (!app_id.contains('*')
+            && identifier_without_team_component(app_id, team_id)
+                == identifier_without_team_component(bundle_id, team_id))
 }
 
 fn team_app_ids_for_account(account: &AccountOption, team_id: &str) -> Option<Vec<AppIdOption>> {
@@ -1014,6 +1184,91 @@ mod tests {
         );
         assert_eq!(plan.available_quantity, Some(5));
         assert_eq!(plan.remaining_after_signing(), Some(3));
+    }
+
+    #[test]
+    fn provisioning_plan_reuses_unchanged_registered_app_ids() {
+        let app = app("com.example.app", &["com.example.app.widget"]);
+        let team = team(
+            vec![app_id("com.example.app"), app_id("com.example.app.widget")],
+            Some(5),
+        );
+
+        let targets =
+            signing_app_id_targets(&team.identifier, &team.app_ids, true, None, &app).unwrap();
+        let plan = app_id_provisioning_plan(&team, true, None, &app).unwrap();
+
+        assert!(plan.app_ids.is_empty());
+        assert_eq!(targets.root.bundle_identifier, "com.example.app");
+        assert_eq!(
+            targets.nested[0].bundle_identifier,
+            "com.example.app.widget"
+        );
+    }
+
+    #[test]
+    fn provisioning_plan_reuses_team_prefixed_registered_app_ids() {
+        let app = app("com.example.app", &["com.example.app.widget"]);
+        let team = team(
+            vec![
+                app_id("TEAM.com.example.app"),
+                app_id("TEAM.com.example.app.widget"),
+            ],
+            Some(5),
+        );
+
+        let targets =
+            signing_app_id_targets(&team.identifier, &team.app_ids, true, None, &app).unwrap();
+        let plan = app_id_provisioning_plan(&team, true, None, &app).unwrap();
+
+        assert!(plan.app_ids.is_empty());
+        assert_eq!(targets.root.bundle_identifier, "TEAM.com.example.app");
+        assert_eq!(
+            targets.nested[0].bundle_identifier,
+            "TEAM.com.example.app.widget"
+        );
+    }
+
+    #[test]
+    fn provisioning_plan_reuses_registered_ids_after_a_root_bundle_override() {
+        let mut app = app(
+            "com.google.ios.youtube",
+            &["com.google.ios.youtube.OpenYouTube.Extension"],
+        );
+        app.metadata
+            .bundle_id
+            .set_override("ddcom.google.ios.youtube".to_string());
+        let team = team(
+            vec![
+                app_id("ddcom.google.ios.youtube.TEAM"),
+                app_id("ddcom.google.ios.youtube.TEAM.OpenYouTube.Extension"),
+            ],
+            Some(5),
+        );
+
+        let plan = app_id_provisioning_plan(&team, true, None, &app).unwrap();
+
+        assert!(plan.app_ids.is_empty());
+    }
+
+    #[test]
+    fn provisioning_plan_chooses_the_existing_layout_with_fewer_missing_ids() {
+        let app = app("com.example.app", &["com.example.app.widget"]);
+        let team = team(
+            vec![
+                app_id("com.example.app.TEAM"),
+                app_id("TEAM.com.example.app"),
+                app_id("TEAM.com.example.app.widget"),
+            ],
+            Some(5),
+        );
+
+        let targets =
+            signing_app_id_targets(&team.identifier, &team.app_ids, true, None, &app).unwrap();
+        let plan = app_id_provisioning_plan(&team, true, None, &app).unwrap();
+
+        assert!(plan.app_ids.is_empty());
+        assert_eq!(targets.root.bundle_identifier, "TEAM.com.example.app");
     }
 
     #[test]

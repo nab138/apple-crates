@@ -22,6 +22,9 @@ pub(crate) fn effective_bundle_identifier(bundle_id: &str, team_id: &str) -> Str
     let team_id = team_id.trim();
     if team_id.is_empty()
         || bundle_id
+            .strip_prefix(team_id)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        || bundle_id
             .strip_suffix(team_id)
             .is_some_and(|prefix| prefix.ends_with('.'))
     {
@@ -245,6 +248,10 @@ mod tests {
         assert_eq!(
             effective_bundle_identifier("com.example.app.TEAM123", "TEAM123"),
             "com.example.app.TEAM123"
+        );
+        assert_eq!(
+            effective_bundle_identifier("TEAM123.com.example.app", "TEAM123"),
+            "TEAM123.com.example.app"
         );
         assert_eq!(
             effective_nested_bundle_identifier(
