@@ -1,5 +1,4 @@
 use crate::error::{CodeSignError, Result};
-use crate::file_bytes::read_file_bytes;
 use crate::signature::{
     CmsSigner, CodeDirectoryParams, ExecutableSegment, SuperblobSizePlan, der_entitlements_blob,
     empty_requirements_blob, encode_embedded_signature, entitlement_exec_flags, entitlements_blob,
@@ -64,8 +63,8 @@ impl<'a> MachOSigningConfig<'a> {
 }
 
 pub fn sign_macho_file(path: &Path, config: &MachOSigningConfig<'_>) -> Result<()> {
-    let original = read_file_bytes(path)?;
-    let signed = sign_macho_data(path, original.as_slice(), config)?;
+    let original = fs::read(path).map_err(|source| CodeSignError::io(path, source))?;
+    let signed = sign_macho_owned(path, original, config)?;
     fs::write(path, signed).map_err(|source| CodeSignError::io(path, source))?;
     Ok(())
 }
@@ -75,7 +74,11 @@ pub fn sign_macho_data(
     data: &[u8],
     config: &MachOSigningConfig<'_>,
 ) -> Result<Vec<u8>> {
-    sign_macho_owned(path, data.to_vec(), config)
+    if let Some(fat_arches) = parse_fat_arches(path, data)? {
+        sign_fat_macho(path, data, fat_arches, config)
+    } else {
+        Ok(sign_thin_macho(path, data.to_vec(), config)?.data)
+    }
 }
 
 fn sign_macho_owned(
@@ -84,24 +87,34 @@ fn sign_macho_owned(
     config: &MachOSigningConfig<'_>,
 ) -> Result<Vec<u8>> {
     if let Some(fat_arches) = parse_fat_arches(path, &data)? {
-        let signed_arches = fat_arches
-            .par_iter()
-            .map(|arch| {
-                let bytes = data[arch.offset..arch.offset + arch.size].to_vec();
-                let signed = sign_thin_macho(path, bytes, config)?;
-                Ok(SignedArch {
-                    cputype: signed.cputype,
-                    cpusubtype: signed.cpusubtype,
-                    align: arch.align,
-                    data: signed.data,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        rebuild_fat(path, &signed_arches)
+        sign_fat_macho(path, &data, fat_arches, config)
     } else {
         Ok(sign_thin_macho(path, data, config)?.data)
     }
+}
+
+// copies
+fn sign_fat_macho(
+    path: &Path,
+    data: &[u8],
+    fat_arches: Vec<FatArch>,
+    config: &MachOSigningConfig<'_>,
+) -> Result<Vec<u8>> {
+    let signed_arches = fat_arches
+        .par_iter()
+        .map(|arch| {
+            let bytes = data[arch.offset..arch.offset + arch.size].to_vec();
+            let signed = sign_thin_macho(path, bytes, config)?;
+            Ok(SignedArch {
+                cputype: signed.cputype,
+                cpusubtype: signed.cpusubtype,
+                align: arch.align,
+                data: signed.data,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    rebuild_fat(path, &signed_arches)
 }
 
 fn sign_thin_macho(
