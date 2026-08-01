@@ -2,10 +2,13 @@ use crate::error::{CodeSignError, Result};
 use crate::file_bytes::read_file_bytes;
 use crate::macho::{DEFAULT_CMS_BLOB_RESERVATION, MachOSigningConfig, sign_macho_file};
 use crate::signature::CmsSigner;
+#[cfg(feature = "wasm")]
+use isideload_vfs::fs;
 use plist::{Dictionary, Value};
 use rayon::prelude::*;
 use sha1::Digest as _;
 use std::collections::BTreeMap;
+#[cfg(not(feature = "wasm"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 

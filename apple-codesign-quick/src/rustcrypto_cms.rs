@@ -38,6 +38,21 @@ pub struct RustCryptoCmsSigner {
 }
 
 impl RustCryptoCmsSigner {
+    #[cfg(feature = "wasm")]
+    pub fn new(
+        private_key: RsaPrivateKey,
+        signer_certificate: Certificate,
+        certificate_chain: Vec<Certificate>,
+    ) -> Self {
+        Self {
+            signing_key: RsaSha256SigningKey::new(private_key),
+            signer_certificate,
+            certificate_chain,
+            signing_time: None,
+        }
+    }
+
+    #[cfg(not(feature = "wasm"))]
     pub fn new(
         private_key: RsaPrivateKey,
         signer_certificate: Certificate,

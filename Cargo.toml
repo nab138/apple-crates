@@ -1,17 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["adi", "adid-proxy", "android-coreadi", "grandslam", "apple-codesign-quick", "elf-loader", "fairplay", "itunes", "library-coreadi", "plist-macros", "purple-builder", "super-sideloader", "xcode"]
+members = ["apple-codesign-quick"]
 
 [workspace.dependencies]
-adi = { path = "adi" }
-adid-proxy = { path = "adid-proxy" }
-android-coreadi = { path = "android-coreadi" }
-elf-loader = { path = "elf-loader" }
-grandslam = { path = "grandslam" }
-itunes = { path = "itunes" }
-library-coreadi = { path = "library-coreadi" }
-plist-macros = { path = "plist-macros" }
-xcode = { path = "xcode" }
 
 plist = "1"
 reqwest = { version = "0.13", features = ["rustls", "query", "gzip"] }
@@ -25,6 +16,3 @@ hmac = "0.13.0"
 pbkdf2 = "0.13.0"
 sha1 = "0.11.0"
 sha2 = "0.11.0"
-
-[patch."https://github.com/zed-industries/zed.git"]
-gpui = { git = "https://github.com/gpui-ce/gpui-ce" }

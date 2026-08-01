@@ -2,8 +2,11 @@ use apple_codesign::{
     BundleSigningSettings, CodeSignError, ProvisioningProfile, Result, RustCryptoCmsSigner,
     sign_bundle,
 };
+#[cfg(feature = "wasm")]
+use isideload_vfs::fs;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+#[cfg(not(feature = "wasm"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 

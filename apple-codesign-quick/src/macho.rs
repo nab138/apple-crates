@@ -5,8 +5,11 @@ use crate::signature::{
     entitlements_xml, planned_superblob_len_from_parts,
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+#[cfg(feature = "wasm")]
+use isideload_vfs::fs;
 use plist::Dictionary;
 use rayon::prelude::*;
+#[cfg(not(feature = "wasm"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 

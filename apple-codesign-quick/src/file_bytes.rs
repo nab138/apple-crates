@@ -1,5 +1,8 @@
 use crate::error::{CodeSignError, Result};
+#[cfg(feature = "wasm")]
+use isideload_vfs::fs;
 use memmap2::{Mmap, MmapOptions};
+#[cfg(not(feature = "wasm"))]
 use std::fs;
 use std::path::Path;
 
@@ -34,7 +37,14 @@ pub(crate) fn read_file_bytes(path: &Path) -> Result<FileBytes> {
     // for that file and before we write the signed replacement. Concurrent
     // external mutation of the bundle while signing is outside the supported
     // contract, matching the same precondition as the D MmFile implementation.
+    #[cfg(feature = "wasm")]
+    return fs::read(path)
+        .map(FileBytes::Owned)
+        .map_err(|source| CodeSignError::io(path, source));
+
+    #[cfg(not(feature = "wasm"))]
     let mapped = unsafe { MmapOptions::new().map(&file) };
+    #[cfg(not(feature = "wasm"))]
     match mapped {
         Ok(map) => Ok(FileBytes::Mapped(map)),
         Err(_) => fs::read(path)

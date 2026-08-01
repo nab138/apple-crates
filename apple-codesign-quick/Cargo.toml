@@ -3,6 +3,9 @@ name = "apple-codesign"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+wasm = ["isideload-vfs"]
+
 [dependencies]
 plist.workspace = true
 thiserror.workspace = true
@@ -19,3 +22,4 @@ rsa = { version = "0.9.9", features = ["sha2"] }
 sha2_010 = { package = "sha2", version = "0.10" }
 spki = "0.7.3"
 x509-cert = "0.2.5"
+isideload-vfs = { version = "0.0.1", optional = true }
