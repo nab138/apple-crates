@@ -373,8 +373,7 @@ impl ThinMachO {
         })?;
 
         let extra_file_size = signature_len - datasize;
-        let extra_vm_size = page_ceil(signature_len).saturating_sub(page_ceil(datasize));
-        self.grow_linkedit_segment(linkedit_offset, extra_file_size, extra_vm_size)?;
+        self.grow_linkedit_segment(linkedit_offset, extra_file_size)?;
 
         self.data.truncate(dataoff);
         self.data.resize(dataoff + signature_len, 0);
@@ -515,7 +514,6 @@ impl ThinMachO {
         &mut self,
         command_offset: usize,
         extra_file_size: usize,
-        extra_vm_size: usize,
     ) -> Result<()> {
         let cmd = LittleEndian::read_u32(&self.data[command_offset..command_offset + 4]);
         match cmd {
@@ -527,21 +525,21 @@ impl ThinMachO {
                         as usize;
                 let vmsize =
                     LittleEndian::read_u32(&self.data[vmsize_offset..vmsize_offset + 4]) as usize;
+                let new_filesize =
+                    checked_add(&self.path, filesize, extra_file_size, "__LINKEDIT filesize")?;
+                let new_vmsize = vmsize.max(page_ceil(new_filesize));
+
                 LittleEndian::write_u32(
                     &mut self.data[filesize_offset..filesize_offset + 4],
-                    checked_add(&self.path, filesize, extra_file_size, "__LINKEDIT filesize")?
-                        .try_into()
-                        .map_err(|_| {
-                            CodeSignError::macho(&self.path, "__LINKEDIT filesize exceeds u32")
-                        })?,
+                    new_filesize.try_into().map_err(|_| {
+                        CodeSignError::macho(&self.path, "__LINKEDIT filesize exceeds u32")
+                    })?,
                 );
                 LittleEndian::write_u32(
                     &mut self.data[vmsize_offset..vmsize_offset + 4],
-                    checked_add(&self.path, vmsize, extra_vm_size, "__LINKEDIT vmsize")?
-                        .try_into()
-                        .map_err(|_| {
-                            CodeSignError::macho(&self.path, "__LINKEDIT vmsize exceeds u32")
-                        })?,
+                    new_vmsize.try_into().map_err(|_| {
+                        CodeSignError::macho(&self.path, "__LINKEDIT vmsize exceeds u32")
+                    })?,
                 );
             }
             LC_SEGMENT_64 => {
@@ -550,19 +548,21 @@ impl ThinMachO {
                 let filesize =
                     LittleEndian::read_u64(&self.data[filesize_offset..filesize_offset + 8]);
                 let vmsize = LittleEndian::read_u64(&self.data[vmsize_offset..vmsize_offset + 8]);
+                let extra_file_size = u64::try_from(extra_file_size).map_err(|_| {
+                    CodeSignError::macho(&self.path, "__LINKEDIT growth exceeds u64")
+                })?;
+                let new_filesize = filesize.checked_add(extra_file_size).ok_or_else(|| {
+                    CodeSignError::macho(&self.path, "__LINKEDIT filesize overflow")
+                })?;
+                let new_vmsize = vmsize.max(page_ceil_u64(new_filesize));
+
                 LittleEndian::write_u64(
                     &mut self.data[filesize_offset..filesize_offset + 8],
-                    filesize
-                        .checked_add(extra_file_size as u64)
-                        .ok_or_else(|| {
-                            CodeSignError::macho(&self.path, "__LINKEDIT filesize overflow")
-                        })?,
+                    new_filesize,
                 );
                 LittleEndian::write_u64(
                     &mut self.data[vmsize_offset..vmsize_offset + 8],
-                    vmsize.checked_add(extra_vm_size as u64).ok_or_else(|| {
-                        CodeSignError::macho(&self.path, "__LINKEDIT vmsize overflow")
-                    })?,
+                    new_vmsize,
                 );
             }
             _ => {
@@ -618,66 +618,7 @@ impl ThinMachO {
             signature_len,
             "__LINKEDIT code signature growth",
         )?;
-        let cmd = LittleEndian::read_u32(&self.data[command_offset..command_offset + 4]);
-
-        match cmd {
-            LC_SEGMENT => {
-                let filesize_offset = command_offset + 36;
-                let vmsize_offset = command_offset + 28;
-                let filesize =
-                    LittleEndian::read_u32(&self.data[filesize_offset..filesize_offset + 4])
-                        as usize;
-                let vmsize =
-                    LittleEndian::read_u32(&self.data[vmsize_offset..vmsize_offset + 4]) as usize;
-                let new_filesize =
-                    checked_add(&self.path, filesize, extra_file_size, "__LINKEDIT filesize")?;
-                let new_vmsize = vmsize.max(page_ceil(new_filesize));
-
-                LittleEndian::write_u32(
-                    &mut self.data[filesize_offset..filesize_offset + 4],
-                    new_filesize.try_into().map_err(|_| {
-                        CodeSignError::macho(&self.path, "__LINKEDIT filesize exceeds u32")
-                    })?,
-                );
-                LittleEndian::write_u32(
-                    &mut self.data[vmsize_offset..vmsize_offset + 4],
-                    new_vmsize.try_into().map_err(|_| {
-                        CodeSignError::macho(&self.path, "__LINKEDIT vmsize exceeds u32")
-                    })?,
-                );
-            }
-            LC_SEGMENT_64 => {
-                let filesize_offset = command_offset + 48;
-                let vmsize_offset = command_offset + 32;
-                let filesize =
-                    LittleEndian::read_u64(&self.data[filesize_offset..filesize_offset + 8]);
-                let vmsize = LittleEndian::read_u64(&self.data[vmsize_offset..vmsize_offset + 8]);
-                let new_filesize =
-                    filesize
-                        .checked_add(extra_file_size as u64)
-                        .ok_or_else(|| {
-                            CodeSignError::macho(&self.path, "__LINKEDIT filesize overflow")
-                        })?;
-                let new_vmsize = vmsize.max(page_ceil_u64(new_filesize));
-
-                LittleEndian::write_u64(
-                    &mut self.data[filesize_offset..filesize_offset + 8],
-                    new_filesize,
-                );
-                LittleEndian::write_u64(
-                    &mut self.data[vmsize_offset..vmsize_offset + 8],
-                    new_vmsize,
-                );
-            }
-            _ => {
-                return Err(CodeSignError::macho(
-                    &self.path,
-                    "__LINKEDIT command was not a segment command",
-                ));
-            }
-        }
-
-        Ok(())
+        self.grow_linkedit_segment(command_offset, extra_file_size)
     }
 }
 
@@ -1008,6 +949,44 @@ mod tests {
             BigEndian::read_u32(&signed[dataoff..dataoff + 4]),
             CSMAGIC_EMBEDDED_SIGNATURE
         );
+    }
+
+    #[test]
+    fn signature_growth_keeps_linkedit_vmsize_large_enough() {
+        let mut macho = minimal_macho_with_empty_signature();
+        let linkedit_cmd = 32 + 72;
+        let code_sig_cmd = linkedit_cmd + 72;
+        let linkedit_fileoff = 512usize;
+        let old_signature_size = 1usize;
+        let dataoff = linkedit_fileoff + PAGE_SIZE - old_signature_size;
+
+        macho.resize(dataoff + old_signature_size, 0);
+        write_segment_64(
+            &mut macho,
+            linkedit_cmd,
+            "__LINKEDIT",
+            linkedit_fileoff as u64,
+            PAGE_SIZE as u64,
+        );
+        LittleEndian::write_u32(
+            &mut macho[code_sig_cmd + 8..code_sig_cmd + 12],
+            dataoff as u32,
+        );
+        LittleEndian::write_u32(
+            &mut macho[code_sig_cmd + 12..code_sig_cmd + 16],
+            old_signature_size as u32,
+        );
+
+        let entitlements = Dictionary::new();
+        let config = MachOSigningConfig::new("com.example.test", "TEAMID", &entitlements, None);
+        let signed = sign_macho_data(Path::new("PageBoundaryBinary"), &macho, &config).unwrap();
+
+        let filesize = LittleEndian::read_u64(&signed[linkedit_cmd + 48..linkedit_cmd + 56]);
+        let vmsize = LittleEndian::read_u64(&signed[linkedit_cmd + 32..linkedit_cmd + 40]);
+
+        assert!(filesize > PAGE_SIZE as u64);
+        assert!(vmsize >= filesize);
+        assert_eq!(vmsize, page_ceil_u64(filesize));
     }
 
     #[test]
