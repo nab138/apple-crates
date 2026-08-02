@@ -54,6 +54,14 @@ impl Bundle {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let info_path = path.join("Info.plist");
+        #[cfg(feature = "wasm")]
+        if !isideload_vfs::fs::metadata(&info_path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            return Err(CodeSignError::MissingInfoPlist(info_path));
+        }
+        #[cfg(not(feature = "wasm"))]
         if !info_path.exists() {
             return Err(CodeSignError::MissingInfoPlist(info_path));
         }
@@ -106,6 +114,15 @@ impl Bundle {
             .map_err(|source| CodeSignError::io(&code_signature_dir, source))?;
 
         let code_resources_path = code_signature_dir.join(CODE_RESOURCES_FILE);
+        #[cfg(feature = "wasm")]
+        if isideload_vfs::fs::metadata(&code_resources_path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            isideload_vfs::fs::remove_file(&code_resources_path)
+                .map_err(|source| CodeSignError::io(&code_resources_path, source))?;
+        }
+        #[cfg(not(feature = "wasm"))]
         if code_resources_path.exists() {
             fs::remove_file(&code_resources_path)
                 .map_err(|source| CodeSignError::io(&code_resources_path, source))?;
@@ -187,6 +204,14 @@ impl Bundle {
         let mut bundles = Vec::new();
         for folder in ["Frameworks", "PlugIns"] {
             let dir = self.path.join(folder);
+            #[cfg(feature = "wasm")]
+            if !isideload_vfs::fs::metadata(&dir)
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            #[cfg(not(feature = "wasm"))]
             if !dir.exists() {
                 continue;
             }
@@ -194,6 +219,13 @@ impl Bundle {
             for entry in fs::read_dir(&dir).map_err(|source| CodeSignError::io(&dir, source))? {
                 let entry = entry.map_err(|source| CodeSignError::io(&dir, source))?;
                 let path = entry.path();
+                #[cfg(feature = "wasm")]
+                if !isideload_vfs::fs::metadata(&path)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
                 if entry
                     .file_type()
                     .map_err(|source| CodeSignError::io(&path, source))?
