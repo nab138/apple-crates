@@ -5,9 +5,9 @@ use crate::signature::{
     entitlements_xml, planned_superblob_len_from_parts,
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use isideload_vfs::fs;
 use plist::Dictionary;
 use rayon::prelude::*;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 const MH_MAGIC: u32 = 0xfeed_face;

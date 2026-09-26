@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["adi", "adid-proxy", "android-coreadi", "grandslam", "apple-codesign-quick", "elf-loader", "fairplay", "itunes", "library-coreadi", "plist-macros", "purple-builder", "super-sideloader", "xcode"]
+members = ["apple-codesign-quick"]
+# members = ["adi", "adid-proxy", "android-coreadi", "grandslam", "apple-codesign-quick", "elf-loader", "fairplay", "itunes", "library-coreadi", "plist-macros", "purple-builder", "super-sideloader", "xcode"]
 
 [workspace.dependencies]
 adi = { path = "adi" }

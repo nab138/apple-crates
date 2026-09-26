@@ -2,11 +2,11 @@ use crate::error::{CodeSignError, Result};
 use crate::file_bytes::read_file_bytes;
 use crate::macho::{DEFAULT_CMS_BLOB_RESERVATION, MachOSigningConfig, sign_macho_file};
 use crate::signature::CmsSigner;
+use isideload_vfs::fs;
 use plist::{Dictionary, Value};
 use rayon::prelude::*;
 use sha1::Digest as _;
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 const FAIRPLAY_DIR: &str = "SC_Info";
@@ -51,7 +51,7 @@ impl Bundle {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let info_path = path.join("Info.plist");
-        if !info_path.exists() {
+        if !fs::metadata(&info_path).is_ok() {
             return Err(CodeSignError::MissingInfoPlist(info_path));
         }
 
@@ -103,7 +103,7 @@ impl Bundle {
             .map_err(|source| CodeSignError::io(&code_signature_dir, source))?;
 
         let code_resources_path = code_signature_dir.join(CODE_RESOURCES_FILE);
-        if code_resources_path.exists() {
+        if fs::metadata(&code_resources_path).is_ok() {
             fs::remove_file(&code_resources_path)
                 .map_err(|source| CodeSignError::io(&code_resources_path, source))?;
         }
@@ -184,7 +184,7 @@ impl Bundle {
         let mut bundles = Vec::new();
         for folder in ["Frameworks", "PlugIns"] {
             let dir = self.path.join(folder);
-            if !dir.exists() {
+            if !fs::metadata(&dir).is_ok() {
                 continue;
             }
 
@@ -195,7 +195,7 @@ impl Bundle {
                     .file_type()
                     .map_err(|source| CodeSignError::io(&path, source))?
                     .is_dir()
-                    && path.join("Info.plist").exists()
+                    && fs::metadata(path.join("Info.plist")).is_ok()
                 {
                     bundles.push(path);
                 }
@@ -393,7 +393,7 @@ fn hash_resource_files(bundle_path: &Path, resource_files: &[PathBuf]) -> Result
 
 fn remove_fairplay_dir(bundle_path: &Path) -> Result<()> {
     let fairplay_path = bundle_path.join(FAIRPLAY_DIR);
-    if fairplay_path.exists() {
+    if fs::metadata(&fairplay_path).is_ok() {
         fs::remove_dir_all(&fairplay_path)
             .map_err(|source| CodeSignError::io(&fairplay_path, source))?;
     }
@@ -614,8 +614,8 @@ mod tests {
         let test_root = std::env::temp_dir().join(format!(
             "apple-codesign-dylib-resources-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -640,8 +640,8 @@ mod tests {
         let test_root = std::env::temp_dir().join(format!(
             "apple-codesign-nested-resources-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

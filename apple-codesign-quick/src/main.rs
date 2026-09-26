@@ -2,9 +2,9 @@ use apple_codesign_quick::{
     BundleSigningSettings, CodeSignError, ProvisioningProfile, Result, RustCryptoCmsSigner,
     sign_bundle,
 };
+use isideload_vfs::fs;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {

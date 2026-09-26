@@ -5,7 +5,7 @@ use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
 use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
 use const_oid::ObjectIdentifier;
 use der::asn1::{Any, ObjectIdentifier as DerObjectIdentifier, OctetStringRef, SetOfVec};
-use der::{DateTime, Decode, Encode, Sequence};
+use der::{DateTime, Decode, Encode, ErrorKind, Sequence};
 use plist::{Dictionary, Value};
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -13,7 +13,7 @@ use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
 use spki::AlgorithmIdentifierOwned;
 use std::fmt::Display;
-use std::time::SystemTime;
+use web_time::{SystemTime, UNIX_EPOCH};
 use x509_cert::Certificate;
 use x509_cert::attr::{Attribute, AttributeValue};
 
@@ -250,7 +250,11 @@ fn add_certificates(
 }
 
 fn signing_time_attribute(signing_time: SystemTime) -> Result<Attribute> {
-    let date_time = DateTime::from_system_time(signing_time).map_err(cms_der_error)?;
+    let date_time = signing_time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ErrorKind::DateTime.into())
+        .and_then(DateTime::from_unix_duration)
+        .map_err(cms_der_error)?;
     let time_der = if date_time.year() < 1950 || date_time.year() > 2049 {
         der::asn1::GeneralizedTime::from_date_time(date_time)
             .to_der()
